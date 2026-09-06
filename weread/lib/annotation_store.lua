@@ -90,6 +90,12 @@ function Store:put(book_id, kind, key, value, uid)
     self:write(book_id, { { kind = kind, key = key, value = value, uid = uid } })
 end
 
+function Store:clearBook(book_id)
+    book_id = tostring(book_id or "")
+    if book_id == "" then return false, "book id required" end
+    return self.legacy:clearDocument("weread-book-" .. book_id)
+end
+
 function Store:list(book_id, kind)
     local db, err = self:open(book_id, false)
     if not db then

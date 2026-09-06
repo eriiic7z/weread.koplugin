@@ -515,7 +515,7 @@ function M:showCacheManagement()
         separator = true,
         callback = self:safeCallback(_("Clear all cache"), function()
             UIManager:show(ConfirmBox:new{
-                text = _("Clear all cache? Downloaded books and articles will be deleted."),
+                text = _("Clear all cache? Downloaded books and articles, underlines, thoughts, and matching progress will be deleted."),
                 ok_text = _("Clear"),
                 ok_callback = function()
                     self:clearAllCache()
@@ -664,7 +664,7 @@ end
 
 function M:confirmClearBookCache(book_id, title, on_cleared)
     UIManager:show(ConfirmBox:new{
-        text = T(_("Clear cache for \"%1\"?"), title),
+        text = T(_("Clear cache for \"%1\"?\nDownloaded files, underlines, thoughts, and matching progress will be deleted."), title),
         ok_text = _("Clear"),
         ok_callback = function()
             self:clearBookCache(book_id)
@@ -678,11 +678,68 @@ function M:confirmClearBookCache(book_id, title, on_cleared)
     })
 end
 
+local function annotation_document_paths(book)
+    local paths, seen = {}, {}
+    local function add(path)
+        if type(path) == "string" and path ~= "" and not seen[path] then
+            seen[path] = true
+            paths[#paths + 1] = path
+        end
+    end
+    if type(book) ~= "table" then return paths end
+    add(book.cached_file)
+    add(book.cached_full_book)
+    for _, path in pairs(book.cached_chapters or {}) do add(path) end
+    for path in pairs(book.annotation_documents or {}) do add(path) end
+    return paths
+end
+
+function M:clearBookAnnotationData(book_id, book)
+    local request = self._external_annotation_sync
+    if request and request.context
+        and tostring(request.context.book_id) == tostring(book_id)
+        and self._cancelUnifiedAnnotationSync then
+        self:_cancelUnifiedAnnotationSync()
+    end
+    local pending = self._annotation_pending_prefetch
+    if pending and pending.context
+        and tostring(pending.context.book_id) == tostring(book_id) then
+        self._annotation_pending_prefetch = nil
+    end
+
+    local ok, clear_err = pcall(function()
+        local store = self.annotation_store
+            or require("weread.lib.annotation_store"):new(self.settings)
+        local cleared, err = store:clearBook(book_id)
+        if not cleared then error(err or "annotation database delete failed") end
+        local legacy = self.external_annotations_db
+        if legacy then
+            for _, path in ipairs(annotation_document_paths(book)) do
+                local removed, legacy_err = legacy:clearDocument(path)
+                if not removed then error(legacy_err or "legacy annotation database delete failed") end
+            end
+        end
+    end)
+    if not ok then
+        logger.warn("annotation cache cleanup failed:", tostring(clear_err))
+        return false, tostring(clear_err)
+    end
+
+    if self._annotation_context
+        and tostring(self._annotation_context.book_id) == tostring(book_id) then
+        self._annotation_context = nil
+        self._unified_annotations_active = nil
+        if self._xpointer_overlay then self._xpointer_overlay:setRecords({}) end
+    end
+    return true
+end
+
 function M:clearBookCache(book_id)
     local books = self.settings:get("books", {})
     local book = books[book_id]
     local path_to_remove = book and (book.cached_full_book or book.cached_file)
     local cache_dir = Content.book_resolved_dir(self.settings, book_id, book)
+    self:clearBookAnnotationData(book_id, book)
     os.execute("rm -rf " .. string.format("%q", cache_dir))
     if book then
         books[book_id] = nil
@@ -753,6 +810,7 @@ function M:clearAllCache()
         ReadCollection:write({ [name] = true })
     end)
     for book_id, book in pairs(books) do
+        self:clearBookAnnotationData(book_id, book)
         os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
     end
     self.settings:set("books", {})

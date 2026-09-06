@@ -228,6 +228,15 @@ package.preload["ui/widget/pathchooser"] = function()
     return { new = function(_self, options) return options end }
 end
 package.preload["weread.lib.scan"] = function() return {} end
+local annotation_clears, legacy_annotation_clears = {}, {}
+package.preload["weread.lib.annotation_store"] = function()
+    return { new = function() return {
+        clearBook = function(_self, book_id)
+            annotation_clears[#annotation_clears + 1] = tostring(book_id)
+            return true
+        end,
+    } end }
+end
 package.preload["weread.lib.logger"] = function()
     return {
         info = function() end,
@@ -271,6 +280,12 @@ local function make_cache_host(books)
             end,
             flush = function() end,
         },
+        external_annotations_db = {
+            clearDocument = function(_self, path)
+                legacy_annotation_clears[#legacy_annotation_clears + 1] = path
+                return true
+            end,
+        },
         refreshShelfCacheIndicators = function() end,
     }
     for key, value in pairs(Cache) do
@@ -281,11 +296,14 @@ end
 
 -- clearBookCache removes the full-book path from the collection.
 coll_adds, coll_removes, coll_writes = {}, {}, 0
+annotation_clears, legacy_annotation_clears = {}, {}
 do
     local host = make_cache_host({
         book = {
             cached_file = "/cache/book/full.epub",
             cached_full_book = "/cache/book/full.epub",
+            cached_chapters = { ["2"] = "/cache/book/chapter-2.epub" },
+            annotation_documents = { ["/cache/book/full.epub"] = {} },
         },
     })
     host:clearBookCache("book")
@@ -296,10 +314,14 @@ do
         "clearBookCache collection name")
     eq(coll_removes[1] and coll_removes[1].no_write, false,
         "clearBookCache writes immediately")
+    eq(annotation_clears[1], "book", "clearBookCache removes unified annotations")
+    eq(#legacy_annotation_clears, 2,
+        "clearBookCache removes unique legacy document annotations")
 end
 
 -- clearAllCache removes every cached_file with deferred writes.
 coll_adds, coll_removes, coll_writes = {}, {}, 0
+annotation_clears, legacy_annotation_clears = {}, {}
 do
     local host = make_cache_host({
         a = { cached_file = "/cache/a/full.epub", cached_full_book = "/cache/a/full.epub" },
@@ -309,6 +331,7 @@ do
     eq(#coll_removes, 2, "clearAllCache removes each book")
     eq(coll_removes[1] and coll_removes[1].no_write, true, "clearAllCache deferred write")
     eq(coll_writes >= 1 and true or false, true, "clearAllCache batch write")
+    eq(#annotation_clears, 2, "clearAllCache removes every annotation database")
 end
 
 -- clearAllMPCache only removes MP books.

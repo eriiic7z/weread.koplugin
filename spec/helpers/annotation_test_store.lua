@@ -81,6 +81,14 @@ function legacy:open(book, create)
 end
 function legacy:getDocument(path) return legacy_entries[path] end
 function legacy:getSyncCheckpoint(path) return legacy_checkpoints[path] end
+function legacy:clearDocument(path)
+    local target = paths[path]
+    if target then
+        os.remove(target); os.remove(target .. "-wal"); os.remove(target .. "-shm")
+        paths[path] = nil
+    end
+    return true
+end
 package.preload["weread.lib.external_annotations_db"] = function()
     return { new = function() return legacy end }
 end
