@@ -27,4 +27,36 @@ assert(#Chapters.descriptor(book, "chapter.epub").chapters == 1)
 assert(not Chapters.descriptor(book, "legacy-full.epub"), "legacy partial file was assumed to be complete")
 local _, sparse = Chapters.map(doc, { catalog[1], catalog[3] })
 assert(sparse["9"].end_xpointer == "10", "an unmatched sibling leaked into the previous chapter")
+
+local outline_doc = { getToc = function() return {
+    { title = "第一章 女性主义理论", xpointer = "100", depth = 1 },
+    { title = "二、男权制的定义", xpointer = "110", depth = 2 },
+    { title = "三. 同与异的问题", xpointer = "120", depth = 2 },
+    { title = "第二章 历史上的女性主义运动", xpointer = "200", depth = 1 },
+    { title = "（一）第一次浪潮", xpointer = "210", depth = 2 },
+} end }
+local outline_catalog = {
+    { chapterUid = "31", title = "第一章 女性主义到底在说什么" },
+    { chapterUid = "32", title = "二 男权制的定义" },
+    { chapterUid = "33", title = "三、同与异的问题" },
+    { chapterUid = "34", title = "(一) 第一次浪潮" },
+}
+local outline_selected, outline_ranges = Chapters.map(outline_doc, outline_catalog)
+assert(#outline_selected == 4, "relaxed title mapping changed chapter selection")
+assert(not outline_ranges["31"], "differently worded chapter heading was force-matched")
+assert(outline_ranges["32"] and outline_ranges["32"].start_xpointer == "110",
+    "ideographic comma and space outline headings did not match")
+assert(outline_ranges["33"] and outline_ranges["33"].start_xpointer == "120",
+    "period and ideographic comma outline headings did not match")
+assert(outline_ranges["34"] and outline_ranges["34"].start_xpointer == "210",
+    "full-width and ASCII parenthesized outline headings did not match")
+
+local ambiguous_doc = { getToc = function() return {
+    { title = "一、概述", xpointer = "300", depth = 2 },
+    { title = "二、概述", xpointer = "310", depth = 2 },
+} end }
+local _, ambiguous_ranges = Chapters.map(ambiguous_doc, {
+    { chapterUid = "41", title = "三 概述" },
+})
+assert(not ambiguous_ranges["41"], "ambiguous relaxed title was force-matched")
 print("annotation_chapters_spec: nested TOC, UTF-8 titles and noncontiguous selections passed")

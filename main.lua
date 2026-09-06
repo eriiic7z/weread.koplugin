@@ -68,7 +68,7 @@ function WeReadPlugin:init()
         temp_dir = self.settings.data_dir .. "/workers",
         -- A soft launch gate, not a reservation: fork uses copy-on-write and
         -- normally consumes far less than this on a 512 MB Kindle.
-        min_available_kb = 128 * 1024,
+        min_available_kb = 64 * 1024,
     }
     self.downloader = Downloader:new{
         client = self.client,

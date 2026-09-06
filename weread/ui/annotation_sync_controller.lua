@@ -370,7 +370,10 @@ function M:_runAnnotationJob(context, options)
                     context.store:put(context.book_id, "meta", "prune_catalog", nil)
                 end
                 local summary = self:_annotationSummary(context)
-                if summary.chapters == #context.chapters and #context.chapters > 0 then
+                -- A chapter selected from the picker is immediately usable.
+                -- Do not wait for every mapped chapter in the document before
+                -- activating the projection that was just created.
+                if summary.located > 0 then
                     context.store:put(context.book_id, "display", context.document_key, true)
                     if not self._unified_annotations_active then
                         self._unified_annotations_active = true
@@ -488,6 +491,11 @@ function M:onUnifiedAnnotationsReady()
     local ok, context = pcall(self._prepareAnnotationContext, self, false)
     if not ok then logger.warn("annotation context:", context); return end
     if not context then return end
+    -- Recover partial chapter selections created by older builds that wrote a
+    -- projection but waited for the whole document before marking it usable.
+    if self:_annotationSummary(context).located > 0 then
+        context.store:put(context.book_id, "display", context.document_key, true)
+    end
     self._unified_annotations_active = self:_usesUnifiedAnnotations()
     self:_refreshAnnotationOverlay()
     if context.store:get(context.book_id, "meta", "enabled")

@@ -13,7 +13,7 @@ if not ok_json then Json = require("rapidjson") end
 local Worker = {}
 Worker.__index = Worker
 
-local DEFAULT_MIN_AVAILABLE_KB = 128 * 1024
+local DEFAULT_MIN_AVAILABLE_KB = 64 * 1024
 local DEFAULT_TIMEOUT_SECONDS = 180
 local DEFAULT_CANCEL_GRACE_SECONDS = 5
 local DEFAULT_POLL_INTERVAL = 0.25

@@ -73,7 +73,7 @@ local function new_worker(memory_kb)
         read_memory = function()
             return "MemAvailable: " .. tostring(memory_kb) .. " kB\n"
         end,
-        min_available_kb = 128 * 1024,
+        min_available_kb = 64 * 1024,
     }
 end
 local function poll()
@@ -144,7 +144,7 @@ local low_ok, low_err = low:start {
     on_done = function(value) low_result = value end,
 }
 expect(not low_ok and low_err == "low_memory" and next_pid == launches_before,
-    "128 MB gate still attempted to fork")
+    "64 MB gate still attempted to fork")
 expect(low_result and low_result.available_kb == 32 * 1024,
     "low-memory result omitted available memory")
 

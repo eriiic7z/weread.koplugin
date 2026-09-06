@@ -164,6 +164,24 @@ end
 host:chooseAnnotationChapters()
 assert(picker_options.initial_page == 2,
     "chapter picker did not open on the current local chapter page")
+-- Matching one selected chapter must activate its projection immediately;
+-- waiting for every mapped chapter leaves valid underlines invisible.
+context.chapters = { { chapterUid = "1" }, { chapterUid = "2" } }
+context.ranges = {}
+context.statuses = {}
+host._unified_annotations_active = false
+store:put("book", "display", "single", nil)
+local applied_before_partial = applied
+host:_runAnnotationJob(context, { chapters = { context.chapters[1] }, refresh = true })
+drain()
+assert(store:get("book", "display", "single") == true
+    and host._unified_annotations_active == true
+    and applied == applied_before_partial + 1,
+    "a successfully matched selected chapter did not activate its projection")
+store:put("book", "display", "single", nil)
+host:onUnifiedAnnotationsReady()
+assert(store:get("book", "display", "single") == true,
+    "an existing partial projection was not activated when reopening the book")
 -- Clearing is the explicit refresh path: shared annotations and every file's
 -- coordinates are removed, while cached chapter text remains reusable.
 context.chapters = { { chapterUid = "1" }, { chapterUid = "2" }, { chapterUid = "3" } }

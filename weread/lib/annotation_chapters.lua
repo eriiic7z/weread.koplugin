@@ -4,6 +4,10 @@ function Chapters.uid(chapter)
     return tostring(chapter.chapterUid or chapter.chapterId or chapter.chapter_uid or "")
 end
 local UPDATE_SUFFIX_KEYWORDS = { "更", "求", "订", "阅", "票", "藏", "赏" }
+local OUTLINE_NUMBER_TOKENS = {
+    "零", "〇", "一", "二", "三", "四", "五", "六", "七", "八", "九",
+    "十", "百", "千", "万", "两",
+}
 
 local function has_update_keyword(text)
     for _i, keyword in ipairs(UPDATE_SUFFIX_KEYWORDS) do
@@ -76,6 +80,38 @@ local function normalized_chapter_title(value)
     return title:gsub("%s+", " ")
 end
 
+local function is_outline_number(value)
+    local original = tostring(value or "")
+    if original == "" then return false end
+    local number = original:gsub("%d", "")
+        :gsub("[IVXLCDMivxlcdm]", "")
+    for _, token in ipairs(OUTLINE_NUMBER_TOKENS) do
+        number = number:gsub(token, "")
+    end
+    return number == ""
+end
+
+-- Local EPUBs and WeRead catalogs often spell the same outline heading as
+-- `二、标题`, `二 标题`, `二. 标题` or `（二）标题`. Keep the strict key as the
+-- first choice, then use the title body as a conservative fallback. Very short
+-- bodies retain their full title because headings such as `一、上` repeat often.
+local function relaxed_chapter_title(value)
+    local title = normalized_chapter_title(value)
+    title = title:gsub("\xEF\xBC\x88", "(") -- full-width opening parenthesis （
+    title = title:gsub("\xEF\xBC\x89", ")") -- full-width closing parenthesis ）
+    title = title:gsub("\xEF\xBC\x8C", ",") -- full-width comma ，
+    title = title:gsub("\xEF\xBC\x8E", ".") -- full-width full stop ．
+    local number, rest = title:match("^%((.-)%)[%s,:%.%-]*(.+)$")
+    if not number then
+        number, rest = title:match("^([^,%s:%.%-%)]+)[,%s:%.%-%)]+(.+)$")
+    end
+    if number and rest and is_outline_number(number) then
+        rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+        if #rest >= 6 then return rest end
+    end
+    return title
+end
+
 
 Chapters.normalize = normalized_chapter_title
 
@@ -98,14 +134,22 @@ end
 function Chapters.map(document, catalog, descriptor)
     local ok, toc = pcall(document.getToc, document)
     toc = ok and type(toc) == "table" and toc or {}
-    local by_title, by_exact = {}, {}
+    local by_title, by_exact, by_relaxed = {}, {}, {}
     for index, item in ipairs(toc) do
         local norm = normalized_chapter_title(item.title)
         by_title[norm] = by_title[norm] or {}
         table.insert(by_title[norm], index)
+        local relaxed = relaxed_chapter_title(item.title)
+        by_relaxed[relaxed] = by_relaxed[relaxed] or {}
+        table.insert(by_relaxed[relaxed], index)
         local exact = tostring(item.title or "")
         by_exact[exact] = by_exact[exact] or {}
         table.insert(by_exact[exact], index)
+    end
+    local remote_relaxed_counts = {}
+    for _, chapter in ipairs(catalog) do
+        local relaxed = relaxed_chapter_title(chapter.title)
+        remote_relaxed_counts[relaxed] = (remote_relaxed_counts[relaxed] or 0) + 1
     end
     local ranges, selected, matched, previous = {}, {}, {}, 0
     local allowed
@@ -121,7 +165,18 @@ function Chapters.map(document, catalog, descriptor)
     for index, chapter in ipairs(catalog) do
         local uid = Chapters.uid(chapter)
         local candidates = by_exact[tostring(chapter.title or "")]
-            or by_title[normalized_chapter_title(chapter.title)] or {}
+            or by_title[normalized_chapter_title(chapter.title)]
+        if not candidates then
+            local relaxed = relaxed_chapter_title(chapter.title)
+            local local_candidates = by_relaxed[relaxed]
+            -- A relaxed key is safe only when it identifies one chapter on
+            -- both sides. Exact/strict duplicate titles still use TOC order.
+            if remote_relaxed_counts[relaxed] == 1
+                and local_candidates and #local_candidates == 1 then
+                candidates = local_candidates
+            end
+        end
+        candidates = candidates or {}
         local chosen
         if descriptor and toc[index] then
             chosen = index
