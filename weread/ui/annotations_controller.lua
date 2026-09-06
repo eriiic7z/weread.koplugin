@@ -95,11 +95,6 @@ function M:applyAnnotationVisibility()
 end
 
 function M:toggleAnnotationVisibility()
-    local context = self._annotation_context
-    local summary = context and self:_annotationSummary(context)
-    if self.ensureAnnotationDisplay and (not summary or summary.chapters == 0) then
-        if self:ensureAnnotationDisplay() then return true end
-    end
     local cache = self.settings:get("cache")
     cache.show_annotations = not (cache.show_annotations ~= false)
     self.settings:set("cache", cache)
@@ -109,6 +104,14 @@ function M:toggleAnnotationVisibility()
         self._thought_popup_open = nil
     end
     self:applyAnnotationVisibility()
+    if cache.show_annotations and self.ensureAnnotationDisplay then
+        local context = self._annotation_context
+        local summary = context and self:_annotationSummary(context)
+        if (not summary or summary.chapters == 0)
+            and self:ensureAnnotationDisplay() then
+            return true
+        end
+    end
     self:showTransientInfo(cache.show_annotations
         and _("Underlines and thoughts shown")
         or _("Underlines and thoughts hidden"), 1)

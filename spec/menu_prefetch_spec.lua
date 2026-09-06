@@ -75,6 +75,7 @@ local thought_popup = {
 }
 local available_version
 local annotations_visible = false
+local annotation_menu_updates = 0
 local host = {
     ui = {},
     _xpointerOverlayPrototypeAvailable = function() return true end,
@@ -100,6 +101,9 @@ local host = {
     setAnnotationPrefetchEnabled = function(_self, enabled)
         cache.prefetch_annotations = enabled == true
         return true
+    end,
+    toggleAnnotationVisibility = function()
+        cache.show_annotations = not (cache.show_annotations ~= false)
     end,
     safeCallback = function(_self, _label, callback) return callback end,
 }
@@ -274,6 +278,12 @@ expect(visibility_item and not visibility_item.checked_func(),
 cache.show_annotations = true
 expect(visibility_item and visibility_item.checked_func(),
     "shown annotation preference should show a checked item")
+visibility_item.callback({ updateItems = function()
+    annotation_menu_updates = annotation_menu_updates + 1
+end })
+expect(cache.show_annotations == false and annotation_menu_updates == 1
+        and visibility_item.check_callback_updates_menu == true,
+    "annotation toggle did not refresh the kept-open main menu")
 
 host.detectWeReadBook = function() return "mp-book" end
 local mp_reader_items = host:getMainMenuItems()

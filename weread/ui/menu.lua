@@ -161,8 +161,10 @@ function M:getMainMenuItems()
                 return self.settings:get("cache", {}).show_annotations ~= false
             end,
             keep_menu_open = true,
-            callback = self:safeCallback(_("Show underlines and thoughts"), function()
+            check_callback_updates_menu = true,
+            callback = self:safeCallback(_("Show underlines and thoughts"), function(touchmenu_instance)
                 self:toggleAnnotationVisibility()
+                if touchmenu_instance then touchmenu_instance:updateItems() end
             end),
         }
         if self:_xpointerOverlayPrototypeAvailable() then
