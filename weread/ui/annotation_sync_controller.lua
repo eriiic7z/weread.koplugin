@@ -12,6 +12,21 @@ local function file(plugin)
     return plugin.ui and plugin.ui.document and plugin.ui.document.file
 end
 
+local function annotation_progress(state)
+    local completed = tonumber(state.completed) or 0
+    local current = tonumber(state.current) or 0
+    local count = tonumber(state.count) or 0
+    local fraction = count > 0 and math.max(0, math.min(1, current / count)) or 0
+    if state.stage == "thoughts" then
+        return completed + fraction * 0.5
+    elseif state.stage == "source" then
+        return completed + 0.5
+    elseif state.stage == "match" then
+        return completed + 0.5 + fraction * 0.5
+    end
+    return completed
+end
+
 function M:_annotationStore()
     if not self.annotation_store then
         self.annotation_store = require("weread.lib.annotation_store"):new(self.settings)
@@ -309,10 +324,11 @@ function M:_runAnnotationJob(context, options)
         return self:_runAnnotationPrefetchWorker(request, context, options)
     end
     if not options.background then
+        local job_chapters = options.chapters or context.chapters
         request.progress = require("weread.ui.download_dialog"):new{
             title = _("Sync underlines and thoughts"),
             description = _("Pause at any time. Saved chapters and batches will be reused."),
-            progress_max = #context.chapters,
+            progress_max = #job_chapters,
             buttons = { { { text = _("Pause"), callback = function()
                 self:_cancelUnifiedAnnotationSync()
                 self:showTransientInfo(_("Annotation progress saved."), 2)
@@ -411,8 +427,10 @@ function M:_runAnnotationJob(context, options)
                 title = T(_("%1 · chapter %2/%3"), _("Downloading"),
                     tostring(state.index), tostring(state.total))
             end
+            -- Update the bar before setTitle repaints the dialog, so the text
+            -- and bar always describe the same point in the current chapter.
+            request.progress:reportProgress(annotation_progress(state))
             request.progress:setTitle(title)
-            request.progress:reportProgress(state.completed)
         end
         UIManager:scheduleIn(state.delay or 0.01, safe_step)
     end
