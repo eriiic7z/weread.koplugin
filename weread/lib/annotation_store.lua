@@ -96,6 +96,33 @@ function Store:clearBook(book_id)
     return self.legacy:clearDocument("weread-book-" .. book_id)
 end
 
+-- Delete whole-book derived data without relying on the currently mapped
+-- chapter list.  Catalog metadata, migration markers and cached original text
+-- are intentionally retained so matching can restart without rebuilding the
+-- local chapter index or re-importing stale legacy records.
+function Store:clearKinds(book_id, kinds)
+    local db, open_err = self:open(book_id, false)
+    if not db then
+        if open_err then error(open_err) end
+        return true
+    end
+    local stmt
+    local ok, err = pcall(function()
+        db:exec("BEGIN IMMEDIATE")
+        stmt = db:prepare("DELETE FROM annotation_data WHERE kind=?")
+        for _, kind in ipairs(kinds or {}) do
+            stmt:reset():bind(tostring(kind)):step()
+        end
+        stmt:close(); stmt = nil
+        db:exec("COMMIT")
+    end)
+    if stmt then pcall(function() stmt:close() end) end
+    if not ok then pcall(function() db:exec("ROLLBACK") end) end
+    db:close()
+    if not ok then error(err) end
+    return true
+end
+
 function Store:list(book_id, kind)
     local db, err = self:open(book_id, false)
     if not db then
@@ -157,8 +184,13 @@ function Store.documentKey(path)
     local ok, version = pcall(require, "version")
     local engine = ok and type(version) == "table" and version.getCurrentRevision
         and version:getCurrentRevision() or "unknown"
-    return Crypto.sha256_hex(table.concat({ path, tostring(attr.size),
-        tostring(attr.modification), tostring(attr.change), tostring(engine) }, "\n"))
+    -- Do not include ctime (`change`). Some Kindle filesystems update it while
+    -- merely reopening an unchanged book, which would orphan every projection
+    -- behind a new document key. Size + mtime still invalidate coordinates
+    -- when the EPUB is replaced, while the version prefix deliberately makes
+    -- this stable-key scheme distinct from older keys.
+    return Crypto.sha256_hex(table.concat({ "document-key-v2", path,
+        tostring(attr.size), tostring(attr.modification), tostring(engine) }, "\n"))
 end
 
 function Store:commitChapter(book_id, uid, source, document_key, projection)

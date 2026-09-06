@@ -61,6 +61,7 @@ function M:_usesUnifiedAnnotations()
     local store = self:_annotationStore()
     local key = store.documentKey(file(self))
     return store:get(binding.book_id, "display", key) == true
+        or store:get(binding.book_id, "manual_only", key) == true
 end
 
 function M:_prepareAnnotationContext(online, refresh_catalog)
@@ -214,7 +215,10 @@ function M:_refreshAnnotationOverlay()
             records[#records + 1] = record
         end
     end
-    overlay:setRecords(records)
+    -- locate() emits projections in document order.  Tell the overlay so it
+    -- can use its ordered interval index instead of rescanning every record on
+    -- each page turn. Legacy records keep the conservative linear fallback.
+    overlay:setRecords(records, true)
     overlay._annotation_window = window
 end
 
@@ -658,25 +662,49 @@ function M:clearUnifiedAnnotationProjections()
     local context = self:_prepareAnnotationContext(false)
     if not context then return end
     self:_cancelUnifiedAnnotationSync()
-    local changes = {
-        { kind = "manual_only", key = context.document_key, value = true },
-        { kind = "display", key = context.document_key },
-    }
-    for _, chapter in ipairs(context.chapters) do
-        local uid = Chapters.uid(chapter)
-        -- Clearing is the explicit path for fetching fresh remote data. Remove
-        -- this chapter's shared annotations and every document projection, but
-        -- retain the original chapter text so quote recovery stays cheap.
-        for _, kind in ipairs({ "source", "source_status", "download", "batch",
-            "thought", "refresh", "projection", "matching", "status" }) do
-            changes[#changes + 1] = { kind = kind, uid = uid }
+    local ok, clear_err = pcall(function()
+        -- The mapped chapter list may cover only the current local edition.
+        -- Clear derived rows book-wide so unmapped/stale chapters and old
+        -- document keys cannot reappear after reopening the book.
+        context.store:clearKinds(context.book_id, {
+            "source", "source_status", "download", "batch", "thought",
+            "refresh", "projection", "matching", "status", "generation",
+            "display", "manual_only",
+        })
+        context.store:write(context.book_id, {
+            { kind = "manual_only", key = context.document_key, value = true },
+        })
+
+        -- A migrated local-book database can otherwise seed the unified store
+        -- again. Preserve only its binding and discard records/checkpoints.
+        local legacy = self.external_annotations_db
+        if legacy and context.path then
+            local entry = legacy:getDocument(context.path)
+            local cleared, legacy_err = legacy:clearDocument(context.path)
+            if not cleared then error(legacy_err or "legacy annotation cleanup failed") end
+            if entry and entry.binding then
+                local saved, save_err = legacy:saveDocument(context.path, {
+                    binding = entry.binding,
+                })
+                if not saved then error(save_err or "annotation binding restore failed") end
+            end
         end
+    end)
+    if not ok then
+        logger.warn("annotation cleanup failed:", tostring(clear_err))
+        self:showInfo(T(_("Failed to clear underlines and thoughts: %1"), tostring(clear_err)))
+        return false
     end
-    context.store:write(context.book_id, changes)
     context.statuses = {}
     context.generation = (context.generation or 0) + 1
-    self:_refreshAnnotationOverlay()
+    self._unified_annotations_active = true
+    if self._xpointer_overlay then
+        self._xpointer_overlay._annotation_window = nil
+        self._xpointer_overlay:setRecords({}, true)
+    end
+    self:applyAnnotationVisibility()
     self:showTransientInfo(_("Underlines and thoughts cleared. Match again to download fresh data."), 3)
+    return true
 end
 
 return M

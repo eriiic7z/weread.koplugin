@@ -1,6 +1,20 @@
 package.path = "./?.lua;" .. package.path
 local helper = require("spec.helpers.annotation_test_store")
 local store = helper.new()
+local attrs = { size = 1234, modification = 5678, change = 100 }
+package.preload["libs/libkoreader-lfs"] = function()
+    return { attributes = function() return attrs end }
+end
+package.preload["version"] = function()
+    return { getCurrentRevision = function() return "test-revision" end }
+end
+local stable_key = store.documentKey("/books/test.epub")
+attrs.change = 200
+assert(store.documentKey("/books/test.epub") == stable_key,
+    "document key changed when only ctime changed")
+attrs.modification = 5679
+assert(store.documentKey("/books/test.epub") ~= stable_key,
+    "document key did not change when the EPUB mtime changed")
 store:put("book", "source", "1", { revision = "a", underlines = {} }, "1")
 assert(helper.new():get("book", "source", "1").revision == "a", "shared data must survive reopening")
 assert(not store:get("other", "source", "1"), "books must not share annotation data")

@@ -83,6 +83,7 @@ host.prefetch_worker = {
 for k,v in pairs(Controller) do host[k] = v end
 local store = helper.new()
 host.annotation_store = store
+host.external_annotations_db = store.legacy
 local context = { path = "single", book_id = "book", document_key = "single", store = store,
     binding = { book_id = "book", title = "fixture" }, statuses = {},
     chapters = { { chapterUid = "1" } }, ranges = {} }
@@ -202,17 +203,39 @@ host:onUnifiedAnnotationsReady()
 assert(store:get("book", "display", "single") == true,
     "an existing partial projection was not activated when reopening the book")
 -- Clearing is the explicit refresh path: shared annotations and every file's
--- coordinates are removed, while cached chapter text remains reusable.
+-- coordinates are removed book-wide, even for chapters absent from the current
+-- local edition. Cached chapter text and the local-book binding remain reusable.
 context.chapters = { { chapterUid = "1" }, { chapterUid = "2" }, { chapterUid = "3" } }
 context.ranges = {}
 store:put("book", "original", "1", { spans = {} }, "1")
+store:put("book", "original", "99", { spans = {} }, "99")
 store:put("book", "projection", "other:1", { records = {} }, "1")
+store:put("book", "projection", "stale:99", { records = { {} } }, "99")
+store:put("book", "thought", "99:range", { { content = "stale" } }, "99")
+store:put("book", "source", "99", { underlines = { {} } }, "99")
+store:put("book", "display", "old-document-key", true)
+store:put("book", "manual_only", "old-document-key", true)
+helper.legacy_entries.single = {
+    binding = { book_id = "book", title = "fixture" },
+    records = { { chapter_uid = "99", pos0 = "0", pos1 = "1" } },
+}
 host:clearUnifiedAnnotationProjections()
 assert(not store:get("book", "source", "1")
     and not store:get("book", "projection", "single:1")
-    and not store:get("book", "projection", "other:1"),
-    "clearing did not remove shared annotations and cross-file coordinates")
-assert(store:get("book", "original", "1"),
+    and not store:get("book", "projection", "other:1")
+    and not store:get("book", "source", "99")
+    and not store:get("book", "thought", "99:range")
+    and not store:get("book", "projection", "stale:99"),
+    "clearing did not remove all book-wide annotations and coordinates")
+assert(not store:get("book", "display", "old-document-key")
+    and not store:get("book", "manual_only", "old-document-key")
+    and store:get("book", "manual_only", "single") == true,
+    "clearing retained a stale document display key")
+assert(store:get("book", "original", "1") and store:get("book", "original", "99"),
     "clearing discarded reusable original chapter text")
+assert(helper.legacy_entries.single
+    and helper.legacy_entries.single.binding.book_id == "book"
+    and helper.legacy_entries.single.records == nil,
+    "clearing did not remove legacy records while preserving the binding")
 helper.cleanup()
 print("annotation_sync_controller_spec: consent, completion, cancellation, sessions and prefetch passed")
