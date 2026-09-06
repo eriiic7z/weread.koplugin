@@ -16,6 +16,14 @@ local selected, ranges = Chapters.map(doc, catalog)
 assert(#selected == 3 and ranges["9"].end_xpointer == "10", "child TOC truncated parent chapter")
 assert(Chapters.normalize("第二十四章 序列2") == "序列2")
 assert(Chapters.normalize("第一章 标题（上）") == "标题（上）", "meaningful suffix lost")
+assert(Chapters.normalize("第六章 姑娘请自重") == "姑娘请自重")
+assert(Chapters.normalize("第二百八十四章 姑娘请自重") == "姑娘请自重",
+    "different chapter numbering did not produce the same title key")
+assert(Chapters.normalize("第１２篇 风起云涌（更新）") == "风起云涌",
+    "full-width chapter number or extended ending was not normalized")
+assert(Chapters.normalize("第一个章节说明") == "第一个章节说明",
+    "non-numeric chapter prefix was stripped")
+assert(Chapters.normalize("第六章 上") == "第六章 上", "short chapter title lost its number")
 local partial_doc = { getToc = function() return { toc[1], toc[4] } end }
 local descriptor = { chapters = { catalog[1], catalog[3] } }
 selected, ranges = Chapters.map(partial_doc, catalog, descriptor)
@@ -59,4 +67,17 @@ local _, ambiguous_ranges = Chapters.map(ambiguous_doc, {
     { chapterUid = "41", title = "三 概述" },
 })
 assert(not ambiguous_ranges["41"], "ambiguous relaxed title was force-matched")
+
+local numbered_doc = { getToc = function() return {
+    { title = "第二百八十四章 姑娘请自重", xpointer = "400", depth = 1 },
+    { title = "第十二卷 风起云涌", xpointer = "410", depth = 1 },
+} end }
+local _, numbered_ranges = Chapters.map(numbered_doc, {
+    { chapterUid = "51", title = "第六章 姑娘请自重（更新）" },
+    { chapterUid = "52", title = "第三卷 风起云涌" },
+})
+assert(numbered_ranges["51"] and numbered_ranges["51"].start_xpointer == "400",
+    "same title body with different chapter numbers did not match")
+assert(numbered_ranges["52"] and numbered_ranges["52"].start_xpointer == "410",
+    "volume-number prefix did not match by title body")
 print("annotation_chapters_spec: nested TOC, UTF-8 titles and noncontiguous selections passed")

@@ -4,7 +4,8 @@ function Chapters.uid(chapter)
     return tostring(chapter.chapterUid or chapter.chapterId or chapter.chapter_uid or "")
 end
 local UPDATE_SUFFIX_KEYWORDS = { "更", "求", "订", "阅", "票", "藏", "赏" }
-local OUTLINE_NUMBER_TOKENS = {
+local CHAPTER_ENDINGS = { "章", "节", "回", "卷", "部", "集", "篇" }
+local NUMBER_TOKENS = {
     "零", "〇", "一", "二", "三", "四", "五", "六", "七", "八", "九",
     "十", "百", "千", "万", "两",
 }
@@ -16,45 +17,56 @@ local function has_update_keyword(text)
     return false
 end
 
--- Strips a trailing （…）or (…) group that contains an update keyword.  Uses a
--- byte scan instead of Lua patterns, whose character classes operate on bytes
--- and would truncate multi-byte UTF-8 characters.  Paren positions point at
--- the first byte of each paren.
 local function strip_update_suffix(title)
-    for _ = 1, 3 do
-        local close
-        for i = #title, 1, -1 do
-            local b = title:byte(i)
-            if b == 0x29 then -- )
-                close = i
-                break
-            end
-            if b == 0x89 and i >= 3 -- ） (EF BC 89)
-                and title:byte(i - 1) == 0xBC and title:byte(i - 2) == 0xEF then
-                close = i - 2
-                break
-            end
+    local function strip_group(value, opening, closing)
+        local last_open, from = nil, 1
+        while true do
+            local pos = value:find(opening, from, true)
+            if not pos then break end
+            last_open, from = pos, pos + #opening
         end
-        if not close then return title end
-        local open, open_len
-        for i = close, 1, -1 do
-            local b = title:byte(i)
-            if b == 0x28 then -- (
-                open, open_len = i, 1
-                break
-            end
-            if b == 0x88 and i >= 3 -- （ (EF BC 88)
-                and title:byte(i - 1) == 0xBC and title:byte(i - 2) == 0xEF then
-                open, open_len = i - 2, 3
-                break
-            end
+        local close_at = #value - #closing + 1
+        if last_open and close_at > last_open
+            and value:sub(close_at, close_at + #closing - 1) == closing
+            and has_update_keyword(value:sub(last_open + #opening, close_at - 1)) then
+            return value:sub(1, last_open - 1)
         end
-        if not open then return title end
-        local inner = title:sub(open + open_len, close - 1)
-        if not has_update_keyword(inner) then return title end
-        title = title:sub(1, open - 1)
+        return value
     end
+    local previous
+    repeat
+        previous = title
+        title = strip_group(title, "（", "）")
+        title = strip_group(title, "(", ")")
+    until title == previous
     return title
+end
+
+local function is_chapter_number(value)
+    local original = tostring(value or "")
+    if original == "" then return false end
+    local number = original:gsub("%d", "")
+    for _i, token in ipairs(NUMBER_TOKENS) do
+        number = number:gsub(token, "")
+    end
+    return number == ""
+end
+
+local function strip_chapter_number(value)
+    if value:sub(1, #"第") ~= "第" then return value end
+    local rest = value:sub(#"第" + 1)
+    local ending_pos, ending_len
+    for _i, ending in ipairs(CHAPTER_ENDINGS) do
+        local pos = rest:find(ending, 1, true)
+        if pos and (not ending_pos or pos < ending_pos) then
+            ending_pos, ending_len = pos, #ending
+        end
+    end
+    if not ending_pos or ending_pos <= 1
+        or not is_chapter_number(rest:sub(1, ending_pos - 1)) then
+        return value
+    end
+    return rest:sub(ending_pos + ending_len)
 end
 
 local function normalized_chapter_title(value)
@@ -65,17 +77,19 @@ local function normalized_chapter_title(value)
     title = title:gsub("\xE3\x80\x80", " ") -- full-width space U+3000
     title = title:gsub("\xEF\xBC\x9A", ":") -- full-width colon ：
     title = title:gsub("\xE3\x80\x81", ",") -- ideographic comma 、
-    for _, marker in ipairs({ "章", "节", "回" }) do
-        local stripped, count = title:gsub(
-            "^第.-" .. marker .. "[%s:%.%-]*", "", 1)
-        if count > 0 then
-            title = stripped
-            break
-        end
+    title = title:gsub("\239\188([\144-\153])", function(digit)
+        return string.char(digit:byte() - 96)
+    end)
+    title = strip_update_suffix(title)
+    local stripped = strip_chapter_number(title)
+    if stripped ~= title then
+        stripped = stripped:gsub("^[%s,:%.%-]+", "")
+            :gsub("^%s+", ""):gsub("%s+$", "")
+        -- Keep short titles such as 上/下 tied to their chapter number.
+        if #stripped >= 6 then title = stripped end
     end
     title = title:gsub(
         "^[Cc][Hh][Aa][Pp][Tt][Ee][Rr]%s+[%divxlcdmIVXLCDM%d]+[%s:%.%-]*", "")
-    title = strip_update_suffix(title)
     title = title:gsub("^%s+", ""):gsub("%s+$", "")
     return title:gsub("%s+", " ")
 end
@@ -85,7 +99,7 @@ local function is_outline_number(value)
     if original == "" then return false end
     local number = original:gsub("%d", "")
         :gsub("[IVXLCDMivxlcdm]", "")
-    for _, token in ipairs(OUTLINE_NUMBER_TOKENS) do
+    for _, token in ipairs(NUMBER_TOKENS) do
         number = number:gsub(token, "")
     end
     return number == ""
