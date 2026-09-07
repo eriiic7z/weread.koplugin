@@ -131,15 +131,14 @@ local CoverCell = InputContainer:extend{
 
 function CoverCell:init()
     local padding = Size.padding.small
-    local border = Size.border.thin
     local cover_width = math.max(1, self.width - 2 * padding)
     local label_height = math.min(
         math.max(1, math.floor(self.height * 0.35)),
         Screen:scaleBySize(52)
     )
     local cover_height = math.max(1, self.height - label_height)
-    local image_width = math.max(1, cover_width - 2 * padding - 2 * border)
-    local image_height = math.max(1, cover_height - 2 * padding - 2 * border)
+    local image_width = math.max(1, cover_width - 2 * padding)
+    local image_height = math.max(1, cover_height - 2 * padding)
     local cover_content
     if self.cover_path then
         local image
@@ -178,7 +177,7 @@ function CoverCell:init()
             height = cover_height,
             margin = 0,
             padding = padding,
-            bordersize = border,
+            bordersize = 0,
             background = Blitbuffer.COLOR_WHITE,
             CenterContainer:new{
                 dimen = Geom:new{ w = image_width, h = image_height },
