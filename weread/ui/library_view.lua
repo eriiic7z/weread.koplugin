@@ -15,6 +15,7 @@ local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local OverlapGroup = require("ui/widget/overlapgroup")
+local RightContainer = require("ui/widget/container/rightcontainer")
 local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
@@ -131,35 +132,57 @@ local CoverCell = InputContainer:extend{
 
 function CoverCell:init()
     local padding = Size.padding.small
+    local border = Size.border.thin
     local cover_width = math.max(1, self.width - 2 * padding)
     local label_height = math.min(
         math.max(1, math.floor(self.height * 0.35)),
         Screen:scaleBySize(52)
     )
     local cover_height = math.max(1, self.height - label_height)
-    local image_width = math.max(1, cover_width - 2 * padding)
-    local image_height = math.max(1, cover_height - 2 * padding)
+    -- image box = max area inside the cell (frame border reserved)
+    local image_width = math.max(1, cover_width - 2 * border)
+    local image_height = math.max(1, cover_height - 2 * border)
+    local fit_w, fit_h = image_width, image_height
     local cover_content
     if self.cover_path then
-        local image
+        -- Pass 1: render to discover the best-fit displayed size, so the
+        -- frame can hug the actual cover art (no stretching, no crop).
+        local probe
         local ok = pcall(function()
-            image = ImageWidget:new{
+            probe = ImageWidget:new{
                 file = self.cover_path,
                 width = image_width,
                 height = image_height,
                 scale_factor = 0,
-                -- Shelf thumbnails are short-lived page content. Keeping them
-                -- out of KOReader's 8 MiB global image cache also makes corrupt
-                -- or unexpectedly large legacy files unable to crash the UI.
                 file_do_cache = false,
             }
-            image:getSize()
+            probe:getSize()
         end)
-        if ok and image then
-            cover_content = image
-            self._has_cover = true
-        elseif image and type(image.free) == "function" then
-            pcall(image.free, image)
+        if ok and probe then
+            local cw, ch = probe:getCurrentWidth(), probe:getCurrentHeight()
+            if cw and ch and cw > 0 and ch > 0 then
+                fit_w, fit_h = cw, ch
+            end
+            pcall(probe.free, probe)
+            -- Pass 2: rebuild at exactly the fitted size (same aspect ratio,
+            -- so width/height == best-fit, no distortion), then frame it.
+            local image
+            local ok2 = pcall(function()
+                image = ImageWidget:new{
+                    file = self.cover_path,
+                    width = fit_w,
+                    height = fit_h,
+                    scale_factor = nil,
+                    file_do_cache = false,
+                }
+                image:getSize()
+            end)
+            if ok2 and image then
+                cover_content = image
+                self._has_cover = true
+            elseif image and type(image.free) == "function" then
+                pcall(image.free, image)
+            end
         end
     end
     if not cover_content then
@@ -170,17 +193,20 @@ function CoverCell:init()
         }
         self._has_cover = false
     end
+    -- Frame hugs the cover art: width/height = fitted art + border, padding 0
+    local framed_w = math.max(1, fit_w + 2 * border)
+    local framed_h = math.max(1, fit_h + 2 * border)
     local cover_frame = CenterContainer:new{
         dimen = Geom:new{ w = cover_width, h = cover_height },
         FrameContainer:new{
-            width = cover_width,
-            height = cover_height,
+            width = framed_w,
+            height = framed_h,
             margin = 0,
-            padding = padding,
-            bordersize = 0,
+            padding = 0,
+            bordersize = border,
             background = Blitbuffer.COLOR_WHITE,
             CenterContainer:new{
-                dimen = Geom:new{ w = image_width, h = image_height },
+                dimen = Geom:new{ w = fit_w, h = fit_h },
                 cover_content,
             },
         },
@@ -197,7 +223,10 @@ function CoverCell:init()
             Screen:scaleBySize(16)
         ))
         local corner = CachedCorner:new{ size = corner_size }
-        corner.overlap_offset = { cover_width - corner_size, 0 }
+        -- hug the (possibly shrunken) cover frame's top-right corner
+        local frame_x = math.floor((cover_width - framed_w) / 2)
+        local frame_y = math.floor((cover_height - framed_h) / 2)
+        corner.overlap_offset = { frame_x + framed_w - corner_size, frame_y }
         cover_layers[#cover_layers + 1] = corner
         self._cached_corner_size = corner_size
     end
@@ -318,57 +347,56 @@ function LibraryView:tabBar()
 end
 
 function LibraryView:actionBar()
-    local cell_w = math.floor(self.screen_w / 2)
-    local search_label = self.keyword and self.keyword ~= ""
-        and T(_("⌕ Search: %1"), self.keyword) or _("⌕ Search shelf")
-    local filter_label = self.filter_label and self.filter_label ~= _("All")
-        and T(_("▾ Filter: %1"), self.filter_label) or _("▾ Filter")
-    local sort_label = self.sort_label and self.sort_label ~= ""
-        and T(_("⇅ Sort: %1"), self.sort_label) or _("⇅ Sort")
-    local search_button = Button:new{
-        text = search_label,
-        width = cell_w,
-        radius = 0, margin = 0, bordersize = 0,
-        text_font_bold = false,
-        show_parent = self,
-        callback = function() if self.on_search then self.on_search() end end,
-    }
-    local refresh_button = Button:new{
-        text = _("↻ Get latest"),
-        width = self.screen_w - cell_w,
-        radius = 0, margin = 0, bordersize = 0,
-        text_font_bold = false,
-        show_parent = self,
-        callback = function() if self.on_refresh then self.on_refresh() end end,
-    }
-    local primary = HorizontalGroup:new{ search_button, refresh_button }
-    local sort_button = Button:new{
-            text = sort_label,
-            width = self.mode == "books" and cell_w or self.screen_w,
-            radius = 0, margin = 0, bordersize = 0,
-            text_font_bold = false,
-            show_parent = self,
-            callback = function() if self.on_sort then self.on_sort() end end,
-        }
-    local secondary = HorizontalGroup:new{ sort_button }
-    local filter_button
+    -- actions as one compact group aligned right (books adds 筛选)
+    -- (personal fork: localized literals; active state shown via bold)
+    local search_active = self.keyword and self.keyword ~= ""
+    local filter_active = self.filter_label and self.filter_label ~= _("All")
+    local sort_active = self.sort_label and self.sort_label ~= ""
+    local actions = {}
+    table.insert(actions, {
+        text = "排序", bold = sort_active,
+        cb = function() if self.on_sort then self.on_sort() end end,
+    })
     if self.mode == "books" then
-        filter_button = Button:new{
-            text = filter_label,
-            width = self.screen_w - cell_w,
-            radius = 0, margin = 0, bordersize = 0,
-            text_font_bold = false,
-            show_parent = self,
-            callback = function() if self.on_filter then self.on_filter() end end,
-        }
-        table.insert(secondary, filter_button)
+        table.insert(actions, {
+            text = "筛选", bold = filter_active,
+            cb = function() if self.on_filter then self.on_filter() end end,
+        })
     end
-    self._action_secondary = { sort_button }
-    if filter_button then self._action_secondary[#self._action_secondary + 1] = filter_button end
-    self._action_primary = { search_button, refresh_button }
-    return FrameContainer:new{
-        bordersize = 0, padding = 0, margin = 0,
-        VerticalGroup:new{ align = "left", secondary, primary },
+    table.insert(actions, {
+        text = "搜索", bold = search_active,
+        cb = function() if self.on_search then self.on_search() end end,
+    })
+    table.insert(actions, {
+        text = "刷新", bold = false,
+        cb = function() if self.on_refresh then self.on_refresh() end end,
+    })
+    local gap = HorizontalSpan:new{ width = Screen:scaleBySize(8) }
+    local row = HorizontalGroup:new{}
+    self._action_secondary = {}
+    self._action_primary = {}
+    for _, action in ipairs(actions) do
+        if #row > 0 then row[#row + 1] = gap end
+        local button = Button:new{
+            text = action.text,
+            radius = 0, margin = 0, bordersize = 0,
+            text_font_size = 16,
+            text_font_bold = action.bold == true,
+            show_parent = self,
+            callback = action.cb,
+        }
+        row[#row + 1] = button
+        self._action_primary[#self._action_primary + 1] = button
+    end
+    local row_h = math.max(1, row:getSize().h)
+    -- right padding matches the TitleBar close button's Screen:scaleBySize(11)
+    return RightContainer:new{
+        dimen = Geom:new{ w = self.screen_w, h = row_h },
+        FrameContainer:new{
+            bordersize = 0, padding = 0, margin = 0,
+            padding_right = Screen:scaleBySize(11),
+            row,
+        },
     }
 end
 
@@ -574,16 +602,16 @@ function LibraryView:init()
         self._action_secondary,
         self._action_primary,
     }
-    for _i, item_row in ipairs(self._focus_item_rows) do
+    for _, item_row in ipairs(self._focus_item_rows) do
         rows[#rows + 1] = item_row
     end
     local outside_scroll = {}
-    for _i, button in ipairs(self._tab_buttons) do outside_scroll[button] = true end
-    for _i, button in ipairs(self._action_secondary) do outside_scroll[button] = true end
-    for _i, button in ipairs(self._action_primary) do outside_scroll[button] = true end
+    for _, button in ipairs(self._tab_buttons) do outside_scroll[button] = true end
+    for _, button in ipairs(self._action_secondary) do outside_scroll[button] = true end
+    for _, button in ipairs(self._action_primary) do outside_scroll[button] = true end
     if self._page_buttons then
         rows[#rows + 1] = self._page_buttons
-        for _i, button in ipairs(self._page_buttons) do outside_scroll[button] = true end
+        for _, button in ipairs(self._page_buttons) do outside_scroll[button] = true end
     end
     FocusNav.apply(self, rows, { scroll = scroll, outside_scroll = outside_scroll })
     -- Items follow the three fixed rows (tabs, secondary, primary actions).
