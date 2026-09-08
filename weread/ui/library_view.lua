@@ -958,12 +958,13 @@ end
 function LibraryView:init()
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
+    local top_gap, bottom_gap = ui_reserved_bands()
     -- Full-screen viewport; the top/bottom bands below are left transparent
     -- (spacers), so the SimpleUI top status bar and bottom nav bar of the
     -- FileManager underneath stay visible. The white panel only wraps the
     -- actual content, which is inset by the reserved bands.
     self.dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.screen_h }
-    self.covers_fullscreen = true
+    self.covers_fullscreen = false
     self.outer_margin = 0
     self.content_width = self.screen_w
     self.list_width = self.screen_w - 3 * Screen:scaleBySize(6)
@@ -984,7 +985,8 @@ function LibraryView:init()
     local tool = self:toolRow()
     self:preparePagination()
     local page_bar = self:pageBar()
-    local top_gap, bottom_gap = ui_reserved_bands()
+    self.top_gap = top_gap
+    self.bottom_gap = bottom_gap
     local dock = self:bottomDock(bottom_gap)
     local dock_h = dock and bottom_gap or 0
     local scroll_h = math.max(1, self.screen_h - top_gap - dock_h
@@ -1056,9 +1058,111 @@ function LibraryView:init()
     end
 end
 
+-- Frontlight edge gestures mirroring KOReader: one-finger vertical swipe
+-- on the left edge, and two-finger north/south anywhere, adjust the
+-- frontlight with the same delta curve and on/off boundary as
+-- DeviceListener (calculateGestureDelta).
+function LibraryView:onFrontlightSwipe(ges)
+    if not Device:hasFrontlight() then return false end
+    local dir = type(ges) == "table" and ges.direction or nil
+    local direction
+    if dir == "north" then direction = 1
+    elseif dir == "south" then direction = -1 end
+    if not direction then return false end -- only vertical gestures adjust light
+    local powerd = Device:getPowerDevice()
+    local fl_max = tonumber(powerd.fl_max) or 1
+    local gestureScale = Screen:getHeight() * 0.8 -- swipe/two-finger multiplier
+    local x = math.min(1, (tonumber(ges.distance) or 1) / gestureScale)
+    local delta_int = math.ceil(0.5 * fl_max * x * x)
+    local new_intensity = powerd:frontlightIntensity() + direction * delta_int
+    if new_intensity <= 0 then
+        powerd:turnOffFrontlight()
+    else
+        powerd:setIntensity(new_intensity)
+    end
+    if powerd.updateResumeFrontlightState then
+        pcall(powerd.updateResumeFrontlightState, powerd)
+    end
+    if new_intensity <= 0 then
+        local ok_n, Notification = pcall(require, "ui/widget/notification")
+        if ok_n and Notification then
+            Notification:notify("前光已关闭", Notification.SOURCE_ALWAYS_SHOW)
+        end
+    else
+        local ok_n, Notification = pcall(require, "ui/widget/notification")
+        if ok_n and Notification then
+            Notification:notify(
+                "前光亮度已设为 " .. tostring(powerd:frontlightIntensity()) .. "。",
+                Notification.SOURCE_ALWAYS_SHOW)
+        end
+    end
+    return true
+end
+
 function LibraryView:onShow()
+    -- Top edge interactions replicate the native FileManager zones verbatim:
+    -- DTAP_ZONE_MENU (top 1/8 of the screen, full width, tap + swipe) and
+    -- DTAP_ZONE_MENU_EXT (middle half of the top 1/5). Menu zones are listed
+    -- first so the top-left corner belongs to the menu, not the frontlight.
+    -- The left-edge frontlight swipe (KOReader style) then covers the rest of
+    -- the left 1/8 below the menu band.
+    self:registerTouchZones({
+        {
+            id = "wr_top_tap_menu",
+            ges = "tap",
+            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 / 8 },
+            handler = function(ges) return self:onTopTapMenu(ges) end,
+        },
+        {
+            id = "wr_top_swipe_menu",
+            ges = "swipe",
+            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 / 8 },
+            handler = function(ges) return self:onTopSwipeMenu(ges) end,
+        },
+        {
+            id = "wr_top_swipe_menu_ext",
+            ges = "swipe",
+            screen_zone = { ratio_x = 1 / 4, ratio_y = 0, ratio_w = 2 / 4, ratio_h = 1 / 5 },
+            handler = function(ges) return self:onTopSwipeMenu(ges) end,
+        },
+        {
+            id = "wr_fl_left_edge",
+            ges = "swipe",
+            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1 / 8, ratio_h = 1 },
+            handler = function(ges) return self:onFrontlightSwipe(ges) end,
+        },
+        {
+            id = "wr_fl_two_finger",
+            ges = "two_finger_swipe",
+            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
+            handler = function(ges) return self:onFrontlightSwipe(ges) end,
+        },
+    })
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
+end
+
+-- Native FileManager top-edge interactions: tapping the top 1/8 (or
+-- swiping down from the top 1/8 / middle EXT band) opens the FileManager
+-- TouchMenu. FileManagerMenu itself remembers the last-used tab
+-- (filemanagermenu_tab_index), so re-triggering reopens what was last open.
+-- We forward to FM's own handlers so activation_menu settings are honoured.
+function LibraryView:onTopTapMenu(ges)
+    local ok, FM = pcall(require, "apps/filemanager/filemanager")
+    local menu = ok and FM.instance and FM.instance.menu
+    if menu and type(menu.onTapShowMenu) == "function" then
+        return pcall(menu.onTapShowMenu, menu, ges)
+    end
+    return false
+end
+
+function LibraryView:onTopSwipeMenu(ges)
+    local ok, FM = pcall(require, "apps/filemanager/filemanager")
+    local menu = ok and FM.instance and FM.instance.menu
+    if menu and type(menu.onSwipeShowMenu) == "function" then
+        return pcall(menu.onSwipeShowMenu, menu, ges)
+    end
+    return false
 end
 
 function LibraryView:onCloseWidget()
