@@ -1,5 +1,8 @@
 # WeRead KOReader Plugin
 
+<!-- fork-banner: keep this block when merging upstream (see README.fork.md) -->
+**⚠️ 个人 fork（UI 定制版）**：本仓库基于 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2，fork 版本 **1.4.2-fork.1**。改动集中在书架/书库 UI，与 SimpleUI 深度整合。差异说明见 [README.fork.md](README.fork.md)、[CHANGELOG.fork.md](CHANGELOG.fork.md)；上游功能/协议与免责声明见下。
+
 > **免责声明**：本项目仅供个人学习和技术研究使用，不得用于商业用途。使用本项目所产生的一切后果（包括但不限于账号封禁、数据丢失等）由使用者自行承担，项目作者概不负责。请遵守微信读书的用户协议和相关法律法规。
 
 在 KOReader 上阅读微信读书中的书籍、公众号文章的插件。支持同步进度同步，阅读时长同步和统计，查看书评、划线和想法。让Kindle、Kobo等封闭系统设备也能体验微信读书！
@@ -16,7 +19,7 @@
 koreader/plugins/weread.koplugin/
 ```
 
-4. 重启 KOReader，在菜单中找到：
+1. 重启 KOReader，在菜单中找到：
 
 ```
 工具 → 微信读书
@@ -55,7 +58,6 @@ koreader/plugins/weread.koplugin/
 | 搜索书籍 | 快捷菜单 | 设置 |
 |:---:|:---:|:---:|
 | ![搜索书籍](screenshots/book_search.png) | ![快捷菜单](screenshots/quick_menu.png) | ![设置](screenshots/setting.png) |
-
 
 ## SimpleUI / Zen_UI 集成
 
