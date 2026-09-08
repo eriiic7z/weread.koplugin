@@ -1207,4 +1207,11 @@ function M.show(data, callbacks)
     return view
 end
 
+-- Kindle-style menu veil: apply as soon as this module loads (plugin init
+-- may not run on every launch). Idempotent.
+local wr_scrim = require("weread.ui.menu_scrim_patch")
+if wr_scrim and wr_scrim.ensure then
+    wr_scrim.ensure()
+end
+
 return M

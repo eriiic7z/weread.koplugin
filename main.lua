@@ -45,6 +45,9 @@ function WeReadPlugin:onZenUIReady()
 end
 
 function WeReadPlugin:init()
+    -- Kindle-style dim veil under every native menu (runtime patch, no core
+    -- file edits); safe to call repeatedly
+    pcall(require("weread.ui.menu_scrim_patch").ensure)
     math.randomseed(os.time())
     self.settings = Settings:new()
     self.external_annotations_db = ExternalAnnotationsDB:new(self.settings)
