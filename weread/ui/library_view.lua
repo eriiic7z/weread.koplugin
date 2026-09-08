@@ -454,10 +454,9 @@ function LibraryView:dockTabs()
     return tabs
 end
 
--- Resolve the icon NAME (no ext) for a dock tab id, mirroring SimpleUI's
--- own icon sources; ensures a copy exists in the KOReader user-icons dir
--- (getDataDir/icons) so Button's name-based IconWidget lookup resolves it.
--- Returns nil (text label fallback) when no icon is available.
+-- Resolve the icon FILE for a dock tab id, mirroring SimpleUI's own icon
+-- sources. DockCell renders ImageWidget with file=path, so we return the
+-- exact SVG file SimpleUI draws (no user-icons copy). nil = text fallback.
 function LibraryView:dockIconFor(id)
     local ok, DataStorage = pcall(require, "datastorage")
     if not ok then return nil end
@@ -465,12 +464,9 @@ function LibraryView:dockIconFor(id)
     if not ok_lfs then return nil end
     local base = DataStorage:getDataDir()
     if not base then return nil end
-    local user_icons = base .. "/icons"
     local plugins_dir = base .. "/plugins"
     local sui_icons = plugins_dir .. "/simpleui.koplugin/icons"
-    -- source file for each dock id (same file SimpleUI shows)
     local source
-    local icon_name
     if id:match("^custom_qa_") then
         -- read the QA's stored icon path (e.g. plugins/simpleui.../plugin.svg)
         local store = _sui_store()
@@ -485,45 +481,26 @@ function LibraryView:dockIconFor(id)
             end
             if cand and lfs.attributes(cand, "mode") == "file" then
                 source = cand
-                icon_name = cand:match("([^/]+)%.svg$")
             end
         end
         if not source then
             source = sui_icons .. "/plugin.svg"
-            icon_name = "plugin"
         end
     elseif id == "home" or id == "library" then
         source = sui_icons .. "/library.svg"
-        icon_name = "library"
     elseif id == "homescreen" then
         -- SimpleUI homescreen icon = KOReader mdlight home.svg (not koreader/icons)
-        -- copied under a private name so we never overwrite the shared home.svg
         source = base .. "/resources/icons/mdlight/home.svg"
-        icon_name = "wr_home"
     elseif id == "power" then
         source = sui_icons .. "/power.svg"
-        icon_name = "power"
     elseif id == "settings" or id == "sui_settings" then
         source = sui_icons .. "/settings.svg"
-        icon_name = "settings"
     elseif id == "history" then
         source = sui_icons .. "/history.svg"
-        icon_name = "history"
     elseif id == "collections" then
         source = sui_icons .. "/library.svg"
-        icon_name = "library"
     end
-    if not source or not icon_name then return nil end
-    if lfs.attributes(source, "mode") ~= "file" then return nil end
-    -- ensure a copy under the user icons dir (kept private for homescreen)
-    local target = user_icons .. "/" .. icon_name .. ".svg"
-    if lfs.attributes(target, "mode") ~= "file" then
-        local ok_cp, ffiutil = pcall(require, "ffi/util")
-        if ok_cp and ffiutil.copyFile then
-            pcall(ffiutil.copyFile, source, target)
-        end
-    end
-    if lfs.attributes(target, "mode") == "file" then return target end
+    if source and lfs.attributes(source, "mode") == "file" then return source end
     return nil
 end
 
@@ -682,6 +659,12 @@ end
 function LibraryView:onDockTap(tab_id)
     -- WeRead's own dock entry: already here, nothing to do.
     if tab_id == WEREAD_DOCK_ID then return true end
+    -- Power is an in-place action (same as SimpleUI): show the power menu
+    -- right here, no navigation, no closing this view.
+    if tab_id == "power" then
+        self:showPowerDialog()
+        return true
+    end
 
     local ok, FM = pcall(require, "apps/filemanager/filemanager")
     local fm = ok and FM.instance
@@ -695,7 +678,7 @@ function LibraryView:onDockTap(tab_id)
         pcall(function() self:onClose() end)
     end
 
-    if tab_id == "home" or tab_id == "power" or tab_id == "sui_settings"
+    if tab_id == "home" or tab_id == "sui_settings"
         or tab_id == "settings" or tab_id == "history" then
         -- Navigation targets owned by SimpleUI: close this view first (back
         -- to the SimpleUI screen WeRead was opened from), then replay the tap
@@ -711,11 +694,67 @@ function LibraryView:onDockTap(tab_id)
         close_self()
         return true
     end
-    -- power and anything else: in-place actions need the SimpleUI FM
-    -- environment, so close first, then replay on the real FM immediately.
+    -- Anything else: close first, then replay on the real FM immediately.
     close_self()
     UIManager:scheduleIn(0, replay)
     return true
+end
+
+-- In-place power menu, mirroring SimpleUI's _showPowerDialog (ButtonDialog,
+-- 42%% width, Device-capability driven) but shown over this view; no
+-- navigation, no dependency on the SimpleUI FM environment.
+function LibraryView:showPowerDialog()
+    if self._weread_power_dialog then return end -- ignore double taps
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local Event = require("ui/event")
+    local dialog_w = math.floor(Screen:getWidth() * 0.42)
+    local function _clear()
+        self._weread_power_dialog = nil
+    end
+    local buttons = {}
+    if Device:canRestart() then
+        buttons[#buttons + 1] = {{ text = "重启", callback = function()
+            local d = self._weread_power_dialog
+            self._weread_power_dialog = nil
+            UIManager:close(d)
+            UIManager:broadcastEvent(Event:new("Restart"))
+        end }}
+    end
+    if Device:canReboot() then
+        buttons[#buttons + 1] = {{ text = "重新引导", callback = function()
+            local d = self._weread_power_dialog
+            self._weread_power_dialog = nil
+            UIManager:close(d)
+            UIManager:askForReboot()
+        end }}
+    end
+    if Device:canSuspend() then
+        buttons[#buttons + 1] = {{ text = "休眠", callback = function()
+            local d = self._weread_power_dialog
+            self._weread_power_dialog = nil
+            UIManager:close(d)
+            UIManager:flushSettings()
+            UIManager:suspend()
+        end }}
+    end
+    buttons[#buttons + 1] = {{ text = "退出", callback = function()
+        local d = self._weread_power_dialog
+        self._weread_power_dialog = nil
+        UIManager:close(d)
+        -- Order matters: broadcast Exit FIRST so the FileManager tears down
+        -- while this view still covers it (no FM re-render), then drop this
+        -- view to empty the stack. Measured: this whole path is ~0.15s; the
+        -- remaining exit time is KOReader's own teardown.
+        UIManager:broadcastEvent(Event:new("Exit"))
+        pcall(function() self:onClose() end)
+    end }}
+    self._weread_power_dialog = ButtonDialog:new{
+        width = dialog_w,
+        tap_close_callback = _clear,
+        onCloseWidget = _clear,
+        buttons = buttons,
+    }
+    UIManager:show(self._weread_power_dialog)
 end
 
 function LibraryView:itemStatus(book)
@@ -937,7 +976,9 @@ function LibraryView:init()
         align = "center",
         with_bottom_line = true,
         right_icon_size_ratio = 0.75,
-        close_callback = function() self:onClose() end,
+        -- personal fork: the X close button is hidden (cleaner top bar).
+        -- Closing still works via the physical Back key (key_events.Close)
+        -- and the dock navigation; pass close_callback back here to restore X.
         show_parent = self,
     }
     local tool = self:toolRow()
