@@ -6,8 +6,10 @@
 --   * ReaderMenu       -> in-book document menu
 -- Patching the class table covers existing and future instances, so one
 -- ensure() call covers every menu of the session. e-ink display requires a
--- full-screen refresh to surface a new large layer ("flashui" on show), and
--- a non-flashing full-screen refresh on close to clear the veil ghosting.
+-- full-screen refresh to surface a new large layer; a non-flashing "full"
+-- refresh surfaces it cleanly on this device (no black flash; "flashui" is
+-- the black-flash alternative), and a non-flashing full-screen refresh on
+-- close clears the veil ghosting.
 --
 -- Depends on core signatures (KOReader 2024+):
 --   FileManagerMenu:onShowMenu(tab_index, do_not_show)
@@ -29,11 +31,11 @@ local function patch_menu_class(cls, show_name, close_name, scrim_key)
     end
     cls[show_name] = function(self, tab_index, do_not_show)
         if not do_not_show then
-            -- insert the veil below the menu; flashui forces the e-ink
-            -- full-screen refresh that actually surfaces the new layer
+            -- insert the veil below the menu; a non-flashing full-screen
+            -- refresh surfaces the layer (flashui tested as alternative)
             local layer = DimScrim:new{}
             self[scrim_key] = layer
-            UIManager:show(layer, "flashui")
+            UIManager:show(layer, "full")
             logger.info("wrScrim: veil shown under " .. show_name)
         end
         return orig_show(self, tab_index, do_not_show)
