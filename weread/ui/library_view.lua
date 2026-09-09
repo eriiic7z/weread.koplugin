@@ -54,15 +54,21 @@ local ShelfRow = InputContainer:extend{
     status = "",
     width = nil,
     font_size = 22,
+    pad_h = nil,
+    status_font_size = nil,
+    status_color = nil,
     callback = nil,
     show_parent = nil,
 }
 
 function ShelfRow:init()
-    local padding = Size.padding.large
-    local inner_width = self.width - 2 * padding
+    local pad_h = self.pad_h or Size.padding.large
+    local inner_width = self.width - 2 * pad_h
     local face = Font:getFace("cfont", self.font_size)
-    local status_widget = TextWidget:new{ text = self.status or "", face = face }
+    local status_face = Font:getFace("cfont", self.status_font_size or self.font_size)
+    local status_opts = { text = self.status or "", face = status_face }
+    if self.status_color then status_opts.fgcolor = self.status_color end
+    local status_widget = TextWidget:new(status_opts)
     local status_width = status_widget:getSize().w
     local gap = Size.padding.large
     local title_widget = TextWidget:new{
@@ -75,8 +81,8 @@ function ShelfRow:init()
         bordersize = 0,
         radius = 0,
         margin = 0,
-        padding_left = padding,
-        padding_right = padding,
+        padding_left = pad_h,
+        padding_right = pad_h,
         padding_top = Size.padding.large,
         padding_bottom = Size.padding.large,
         background = Blitbuffer.COLOR_WHITE,
@@ -460,6 +466,7 @@ function LibraryView:actionBar()
             radius = 0, margin = 0, bordersize = 0,
             text_font_size = 16,
             text_font_bold = action.bold == true,
+            padding_v = Screen:scaleBySize(1),
             show_parent = self,
             callback = action.cb,
         }
@@ -583,25 +590,34 @@ function LibraryView:content()
             grid_row[#grid_row + 1] = cover_cell
         end
     else
+        local pub = self.mode == "public_account"
+        local inset = pub and Screen:scaleBySize(24) or Size.padding.large
+        local row_w = pub and self.screen_w or self.list_width
         for index = first, last do
             local book = source[index]
-            local shelf_row = ShelfRow:new{
+            local row_opts = {
                 text = book.title or book.bookId or book.book_id or tr("Untitled"),
                 status = self:itemStatus(book),
-                width = self.list_width,
-                font_size = self.mode == "books" and 20 or 22,
+                width = row_w,
+                font_size = pub and 19 or 20,
                 show_parent = self,
                 callback = function()
                     if self.on_select then self.on_select(book, self.mode) end
                 end,
             }
+            if pub then
+                row_opts.pad_h = Screen:scaleBySize(24)
+                row_opts.status_font_size = 16
+                row_opts.status_color = Blitbuffer.gray(0.55)
+            end
+            local shelf_row = ShelfRow:new(row_opts)
             self._item_rows[#self._item_rows + 1] = shelf_row
             self._focus_item_rows[#self._focus_item_rows + 1] = { shelf_row }
             table.insert(content, shelf_row)
             table.insert(content, HorizontalGroup:new{
-                HorizontalSpan:new{ width = Size.padding.large },
+                HorizontalSpan:new{ width = inset },
                 LineWidget:new{
-                    dimen = Geom:new{ w = self.list_width - 2 * Size.padding.large, h = 1 },
+                    dimen = Geom:new{ w = row_w - 2 * inset, h = 1 },
                     background = Blitbuffer.COLOR_GRAY,
                 },
             })
@@ -612,6 +628,9 @@ end
 
 function LibraryView:pageBar()
     if not self.paged or (self.page_count or 1) <= 1 then return nil end
+    if self.mode == "public_account" then
+        return self:pubPageBar()
+    end
     local cell_w = math.floor(self.screen_w / 3)
     local button_height = Screen:scaleBySize(54)
     local previous = Button:new{
@@ -643,6 +662,52 @@ function LibraryView:pageBar()
     }
     self._page_buttons = { previous, page_text, next_page }
     return HorizontalGroup:new{ previous, page_text, next_page }
+end
+
+--- Public-account (公众号) pager: one slim centred row above the dock.
+--- Backgrounds are proportional to their text: every control button is
+--- sized as text-line + same small vertical padding (like the tab and the
+--- action buttons), so small 14px text gets a proportionally smaller bar.
+function LibraryView:pubPageBar()
+    local pad = Screen:scaleBySize(1)
+    local function mk(text, fs, bold, enabled, cb)
+        return Button:new{
+            text = text, text_font_size = fs,
+            text_font_bold = bold, enabled = enabled,
+            padding_v = pad, radius = 0, margin = 0, bordersize = 0,
+            show_parent = self, callback = cb,
+        }
+    end
+    local previous = mk(tr("Previous"), 14, true, self.page > 1, function()
+        if self.page > 1 and self.on_page_changed then
+            self.on_page_changed(self.page - 1)
+        end
+    end)
+    local next_page = mk(tr("Next"), 14, true, self.page < self.page_count, function()
+        if self.page < self.page_count and self.on_page_changed then
+            self.on_page_changed(self.page + 1)
+        end
+    end)
+    local page_text = Button:new{
+        text = T(tr("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
+        text_font_size = 14, text_font_bold = false,
+        enabled = false, padding_v = pad,
+        radius = 0, margin = 0, bordersize = 0,
+        show_parent = self,
+    }
+    self._page_buttons = { previous, page_text, next_page }
+    local group = HorizontalGroup:new{
+        previous,
+        HorizontalSpan:new{ width = Screen:scaleBySize(8) },
+        page_text,
+        HorizontalSpan:new{ width = Screen:scaleBySize(8) },
+        next_page,
+    }
+    local gh = math.max(1, group:getSize().h)
+    return CenterContainer:new{
+        dimen = Geom:new{ w = self.screen_w, h = gh },
+        group,
+    }
 end
 
 function LibraryView:init()
@@ -731,6 +796,31 @@ function LibraryView:init()
     local scroll_h = math.max(1, self.screen_h - top_gap - dock_h
         - self.title_bar:getHeight() - title_sep:getSize().h
         - tool:getSize().h - (page_bar and page_bar:getSize().h or 0))
+    -- Public-account list: auto-fit the rows per page to the viewport, so no
+    -- dead line is left between the list and the pager (page rows are NOT
+    -- hard-coded here; they follow the available scroll height).
+    if self.paged and self.mode == "public_account" and not self.cover_mode then
+        local probe = ShelfRow:new{
+            text = "\u{4e66}",
+            status = "00",
+            width = self.screen_w,
+            font_size = 19,
+            pad_h = Screen:scaleBySize(24),
+            status_font_size = 16,
+            show_parent = self,
+        }
+        local row_h = math.max(1, probe:getSize().h)
+        -- every rendered row is followed by a 1px separator line
+        local fit = math.max(1, math.floor(scroll_h / (row_h + 1)))
+        if fit ~= self.page_size then
+            self.page_size = fit
+            self:preparePagination()
+            page_bar = self:pageBar()
+            scroll_h = math.max(1, self.screen_h - top_gap - dock_h
+                - self.title_bar:getHeight() - title_sep:getSize().h
+                - tool:getSize().h - (page_bar and page_bar:getSize().h or 0))
+        end
+    end
     if self.cover_mode and self.mode == "books" then
         local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
         self.cover_content_height = scroll_h
