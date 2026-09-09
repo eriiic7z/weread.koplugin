@@ -1,4 +1,4 @@
-# weread.koplugin · 个人 UI 定制版（fork 1.4.2-fork.2）
+# weread.koplugin · 个人 UI 定制版（fork 1.4.2-fork.3）
 
 基于 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的 UI 定制分支，**与 SimpleUI 深度整合**：让 weread 书架看起来、用起来和 SimpleUI 的界面是一套的。仅供个人学习使用，许可证 AGPL-3.0（来源与免责声明见上游 [README.md](README.md) / [NOTICE](NOTICE)）。
 
@@ -13,6 +13,8 @@
 - **顶部下拉原生菜单**：书架顶部点击 / 下滑，与 KOReader 其它页面一样呼出原生主菜单（上次的标签页记忆不变）。
 - **Kindle 式菜单遮罩（全局）**：菜单弹出时页面压暗，外观对标 Kindle 原生下拉（4px 棋盘）；作用于 KOReader 所有原生菜单（书架、文件管理、阅读页），不限于 weread。
 - **前光快捷手势**：左缘上下滑 / 双指上下滑直接调光，原生通知反馈。
+- **阅读统计页同样接入宿主外壳**：从 dock 打开统计 = 统计页自带状态栏与底部导航栏（dock 高亮统计项），与书架同一套体验。
+- **dock 图标 / 项目灵活跟随 SimpleUI**：dock 图标与名称直接读 SimpleUI 的注册表——在 SimpleUI 里换图标、加自定义快捷项、改名，书架与统计 dock 自动跟随。
 
 ## 安装
 
@@ -32,6 +34,8 @@
 ## 使用要点
 
 - 顶部标题栏**没有 ✕ 关闭按钮**：离开 weread 用底部 dock（书库/主页）。
+- 书架 dock 除 SimpleUI 项外，可含**指向 weread 的功能项**（如阅读统计）：点统计 = 直达统计页（书架带 dock/状态栏外壳）；在任意 SimpleUI 屏的 dock 点统计同样带外壳；统计页 dock 点「微信读书」项回书架。
+- 阅读统计页在**阅读器内**打开仍为官方全屏样式（无外壳）。
 - 底部 dock 各档行为：
   - **书库 / 设置 / 历史**：离开 weread 并跳到 SimpleUI 对应屏；
   - **主页**：直接切到 SimpleUI 主页（无中间跳帧）；
@@ -45,6 +49,9 @@
 
 - 镜像的是 SimpleUI 的 **default / icons / 不透明** 配置；若在 SimpleUI 里切换 dock 的 bar style（framed/bare）、显示模式（text/both）或透明背景，本 fork 的 dock 暂不跟随。
 - dock 依赖 SimpleUI 的设置文件结构（`settings/simpleui/sui_settings.lua`），SimpleUI 大版本如改动存储结构可能需要适配。
+- **统计页内容区左缘单指调光暂不支持**（单指左缘与内容滚动为同一手势通道，物理冲突；书架页左缘单指调光正常可用）。统计页可用**双指**调光。
+- **SimpleUI 顶部下拉面板的电源 → 退出**，在遮罩启用且 weread 全屏页在场时可能卡住（SimpleUI 面板未适配第三方全屏页叠加）。**请用底部 dock 的电源退出**（页内电源菜单，正常）。
+- **e-ink 残影**：原生菜单「长 → 短」切换瞬间，让出区域在 e-ink 屏上可能残留旧帧（关闭菜单即恢复，不影响使用）。
 
 ## 维护者同步
 

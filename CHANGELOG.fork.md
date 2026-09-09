@@ -2,6 +2,23 @@
 
 本文件记录相对上游 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的定制变更，均位于 `ui-tweak` 分支。上游自身的变更见仓库根 [CHANGELOG.md](CHANGELOG.md)；fork 用法与边界见 [README.fork.md](README.fork.md)。
 
+## [1.4.2-fork.3] - 2026-09-09
+
+### 新增
+
+- **可复用全屏宿主（FullscreenHost）** — 书架页与阅读统计页共用同一套宿主基础设施：SimpleUI 状态栏 / 底部导航栏让位、dock（图标与标签自动引用 SimpleUI 自己的注册表，换图标、加项目自动跟随）、前光手势（左缘 + 双指）、顶部呼出原生菜单、页内电源菜单、收到 KOReader Exit 广播自动退场。
+- **阅读统计页接入宿主** — 从书架 dock 直达统计页（不再闪主页；书架在数据就绪后才让位），或在任意 SimpleUI 界面 dock 打开统计 = 统计页带状态栏与底部导航栏外壳；在阅读器内打开统计则保持官方全屏原样。
+- **dock 图标 / 项目灵活化** — dock 各项图标与名称直接调用 SimpleUI 的 QA 注册表解析：在 SimpleUI 里换图标、加自定义快捷项、改名，书架 dock 自动跟随；新增的 dock 自定义项（非 weread 入口）可正常点击转发。
+- **dock「当前页」判定修正** — 只有真正指向 weread 插件的 dock 项才高亮为当前页；其余 custom 项按普通项处理。
+
+### 变更
+
+- 书架页 dock / 让位 / 手势 / 电源菜单的实现迁移到 FullscreenHost（架构层提取，行为不变）；dock 图标映射表从写死改为调用 SimpleUI 注册表。
+
+### 移除
+
+- 无（本 fork 均为增量定制）。
+
 ## [1.4.2-fork.2] - 2026-09-08
 
 ### 新增
