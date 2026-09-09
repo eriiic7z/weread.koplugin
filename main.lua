@@ -48,6 +48,11 @@ function WeReadPlugin:init()
     -- Kindle-style dim veil under every native menu (runtime patch, no core
     -- file edits); safe to call repeatedly
     pcall(require("weread.ui.menu_scrim_patch").ensure)
+    -- local-bookshelf visual unify (FM title face / mosaic margins) as a
+    -- runtime patch, so no KOReader / coverbrowser files are modified.
+    -- FM title hook is light and installed synchronously so it catches the
+    -- FM TitleBar construction; heavier coverbrowser work defers itself.
+    pcall(require("weread.ui.fm_visual_patch").apply)
     math.randomseed(os.time())
     self.settings = Settings:new()
     self.external_annotations_db = ExternalAnnotationsDB:new(self.settings)
@@ -169,7 +174,7 @@ function WeReadPlugin:init()
         get_file_context = function(book, path)
             return self:getChapterInfoFromFile(book, path)
         end,
-        run_online = function(_kind, callback, run_options)
+        run_online = function(_, callback, run_options)
             return self:runOnlineTask(
                 _("Sync progress"), callback, nil, run_options)
         end,
