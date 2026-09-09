@@ -43,10 +43,11 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 local FocusNav = require("weread.ui.focus_nav")
+local FullscreenHost = require("weread.ui.fullscreen_host")
 local I18n = require("weread.lib.i18n")
 local T = require("ffi/util").template
 
-local function _(text)
+local function tr(text)
     return I18n.tr(text)
 end
 
@@ -73,16 +74,16 @@ local TABS = {
 local function format_duration(seconds)
     seconds = tonumber(seconds) or 0
     if seconds < 60 then
-        return _("< 1 min")
+        return tr("< 1 min")
     end
     local h = math.floor(seconds / 3600)
     local m = math.floor((seconds % 3600) / 60)
     if h > 0 and m > 0 then
-        return T(_("%1 h %2 min"), h, m)
+        return T(tr("%1 h %2 min"), h, m)
     elseif h > 0 then
-        return T(_("%1 h"), h)
+        return T(tr("%1 h"), h)
     end
-    return T(_("%1 min"), m)
+    return T(tr("%1 min"), m)
 end
 
 -- Compact form for the chart value axis ("3.2h" / "45m" / "0").
@@ -107,9 +108,9 @@ local function format_compare(compare)
         return nil
     end
     if compare > 0 then
-        return T(_("↑ %1% vs previous"), pct)
+        return T(tr("↑ %1% vs previous"), pct)
     end
-    return T(_("↓ %1% vs previous"), pct)
+    return T(tr("↓ %1% vs previous"), pct)
 end
 
 -- ---------------------------------------------------------------------------
@@ -117,6 +118,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local ReadStatsView = FocusManager:extend{
+    host = false, -- hosted overlay (dock/bands/gestures) when opened from the shelf
     data = nil,
     on_prev = nil,
     on_next = nil,
@@ -203,7 +205,7 @@ function ReadStatsView:buildOverviewCard()
     local content = VerticalGroup:new{ align = "left", self:widthPin() }
 
     -- Headline: total reading time, with a small caption to its right.
-    local caption = TextWidget:new{ text = _("Total reading time"), face = f.label }
+    local caption = TextWidget:new{ text = tr("Total reading time"), face = f.label }
     local number = TextWidget:new{
         text = format_duration(d.total_read_time),
         face = f.number,
@@ -217,14 +219,14 @@ function ReadStatsView:buildOverviewCard()
     })
 
     -- Sub-metrics on one wrapping line.
-    local parts = { T(_("%1 days read"), d.read_days or 0) }
+    local parts = { T(tr("%1 days read"), d.read_days or 0) }
     if (d.day_average or 0) > 0 then
-        parts[#parts + 1] = T(_("Daily average %1"), format_duration(d.day_average))
+        parts[#parts + 1] = T(tr("Daily average %1"), format_duration(d.day_average))
     end
     local cmp = format_compare(d.compare)
     if cmp then parts[#parts + 1] = cmp end
     if type(d.read_rate) == "number" and d.read_rate > 0 then
-        parts[#parts + 1] = T(_("Text reading %1%"), math.floor(d.read_rate + 0.5))
+        parts[#parts + 1] = T(tr("Text reading %1%"), math.floor(d.read_rate + 0.5))
     end
     if d.rank_text and d.rank_text ~= "" then
         parts[#parts + 1] = d.rank_text
@@ -240,7 +242,7 @@ function ReadStatsView:buildOverviewCard()
     local summary = d.summary or {}
     if #summary > 0 then
         local chips = {}
-        for _i, s in ipairs(summary) do
+        for _, s in ipairs(summary) do
             chips[#chips + 1] = T("%1 %2", s.name, s.counts)
         end
         table.insert(content, VerticalSpan:new{ width = Size.padding.default })
@@ -269,7 +271,7 @@ function ReadStatsView:buildChartCard()
 
     local n = #buckets
     local max_value = 1
-    for _i, b in ipairs(buckets) do
+    for _, b in ipairs(buckets) do
         if b.value > max_value then max_value = b.value end
     end
 
@@ -326,7 +328,7 @@ function ReadStatsView:buildChartCard()
     local content = VerticalGroup:new{
         align = "left",
         self:widthPin(),
-        self:cardTitle(_("Reading time trend")),
+        self:cardTitle(tr("Reading time trend")),
         HorizontalGroup:new{
             align = "top",
             axis_col,
@@ -343,10 +345,10 @@ function ReadStatsView:buildRankCard()
         return nil
     end
     local max_seconds = 1
-    for _i, item in ipairs(list) do
+    for _, item in ipairs(list) do
         if item.seconds > max_seconds then max_seconds = item.seconds end
     end
-    local content = VerticalGroup:new{ align = "left", self:widthPin(), self:cardTitle(_("Most-read books")) }
+    local content = VerticalGroup:new{ align = "left", self:widthPin(), self:cardTitle(tr("Most-read books")) }
     for i, item in ipairs(list) do
         if i > 1 then
             table.insert(content, VerticalSpan:new{ width = Size.padding.default })
@@ -367,7 +369,7 @@ function ReadStatsView:buildPreferenceCard()
         return nil
     end
 
-    local content = VerticalGroup:new{ align = "left", self:widthPin(), self:cardTitle(_("Reading preferences")) }
+    local content = VerticalGroup:new{ align = "left", self:widthPin(), self:cardTitle(tr("Reading preferences")) }
     local first = true
     local function section(widget)
         if not first then
@@ -379,12 +381,12 @@ function ReadStatsView:buildPreferenceCard()
 
     if #categories > 0 then
         local max_seconds = 1
-        for _i, c in ipairs(categories) do
+        for _, c in ipairs(categories) do
             if c.seconds > max_seconds then max_seconds = c.seconds end
         end
         local group = VerticalGroup:new{
             align = "left",
-            TextWidget:new{ text = d.prefer_category_word or _("Categories"), face = f.label, max_width = self.content_width },
+            TextWidget:new{ text = d.prefer_category_word or tr("Categories"), face = f.label, max_width = self.content_width },
         }
         for i = 1, math.min(#categories, 5) do
             local c = categories[i]
@@ -395,7 +397,7 @@ function ReadStatsView:buildPreferenceCard()
     end
 
     if d.prefer_time_word and d.prefer_time_word ~= "" then
-        section(self:kvLine(_("Preferred time"), d.prefer_time_word, f.body))
+        section(self:kvLine(tr("Preferred time"), d.prefer_time_word, f.body))
     end
 
     local function name_count_line(label, items)
@@ -411,8 +413,8 @@ function ReadStatsView:buildPreferenceCard()
             TextBoxWidget:new{ text = table.concat(parts, "   "), face = f.body, width = self.content_width },
         })
     end
-    if #authors > 0 then name_count_line(_("Favorite authors"), authors) end
-    if #publishers > 0 then name_count_line(_("Favorite publishers"), publishers) end
+    if #authors > 0 then name_count_line(tr("Favorite authors"), authors) end
+    if #publishers > 0 then name_count_line(tr("Favorite publishers"), publishers) end
 
     return self:makeCard(content)
 end
@@ -421,7 +423,7 @@ function ReadStatsView:buildEmptyCard()
     return self:makeCard(VerticalGroup:new{
         align = "left",
         self:widthPin(),
-        TextWidget:new{ text = _("No reading records for this period."), face = self.fonts.body, max_width = self.content_width },
+        TextWidget:new{ text = tr("No reading records for this period."), face = self.fonts.body, max_width = self.content_width },
     })
 end
 
@@ -453,10 +455,10 @@ function ReadStatsView:buildTabBar()
     local cell_w = math.floor(self.screen_w / n)
     local row = HorizontalGroup:new{}
     self._tab_buttons = {}
-    for _i, tab in ipairs(TABS) do
+    for _, tab in ipairs(TABS) do
         local active = (tab.mode == self.data.mode)
         local button = Button:new{
-            text = _(tab.text),
+            text = tr(tab.text),
             width = cell_w,
             radius = 0,
             margin = 0,
@@ -490,12 +492,12 @@ function ReadStatsView:buildNavRow()
     local gap = Size.padding.default
     local btn_w = math.floor((self.screen_w - 3 * gap) / 2)
     local prev_button = Button:new{
-        text = _("‹ Previous"), width = btn_w, show_parent = self,
+        text = tr("‹ Previous"), width = btn_w, show_parent = self,
         enabled = d.allow_prev == true,
         callback = function() self:onPrevPeriod() end,
     }
     local next_button = Button:new{
-        text = _("Next ›"), width = btn_w, show_parent = self,
+        text = tr("Next ›"), width = btn_w, show_parent = self,
         enabled = d.allow_next == true,
         callback = function() self:onNextPeriod() end,
     }
@@ -517,7 +519,32 @@ function ReadStatsView:init()
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.screen_h }
-    self.covers_fullscreen = true
+    if self.host then
+        -- Reusable full-screen host: SimpleUI reserved bands + dock + gestures.
+        -- Active dock item = the reading-statistics QA; the WeRead-launch item
+        -- navigates back to the bookshelf.
+        FullscreenHost.install(self, {
+            dock_highlight = function(_, _, cfg)
+                return cfg ~= nil and cfg.dispatcher_action == "weread_reading_statistics"
+            end,
+            dock_nav = function(view, _, cfg)
+                if cfg and cfg.dispatcher_action == "weread_reading_statistics" then
+                    return true -- current page
+                end
+                if cfg and cfg.plugin_key == "weread" then
+                    -- back to the bookshelf
+                    if view.on_bookshelf then view.on_bookshelf() end
+                    return true
+                end
+                return false
+            end,
+        })
+        self.top_gap, self.bottom_gap = self:reservedBands()
+        self.covers_fullscreen = false
+        self.dock = self:bottomDock(self.bottom_gap)
+    else
+        self.covers_fullscreen = true
+    end
 
     -- Authoritative widths. Reserve space for the scrollbar so cards never get
     -- cropped, and derive the inner content width from card border + padding.
@@ -534,7 +561,7 @@ function ReadStatsView:init()
     end
 
     local d = self.data
-    local mode_title = _(MODE_TITLE[d.mode] or "Reading statistics")
+    local mode_title = tr(MODE_TITLE[d.mode] or "Reading statistics")
     local title = (d.period_label and d.period_label ~= "")
         and T("%1 · %2", mode_title, d.period_label) or mode_title
     self.title_bar = TitleBar:new{
@@ -557,7 +584,11 @@ function ReadStatsView:init()
 
     local top_h = self.title_bar:getHeight() + tab_bar:getSize().h
     local nav_h = nav_row and nav_row:getSize().h or 0
-    local scroll_h = self.screen_h - top_h - nav_h
+    local vreserve = 0
+    if self.host then
+        vreserve = (self.top_gap or 0) + (self.bottom_gap or 0)
+    end
+    local scroll_h = self.screen_h - top_h - nav_h - vreserve
 
     local scroll = ScrollableContainer:new{
         dimen = Geom:new{ w = self.screen_w, h = scroll_h },
@@ -579,17 +610,40 @@ function ReadStatsView:init()
         table.insert(body, nav_row)
     end
 
-    self[1] = FrameContainer:new{
-        background = Blitbuffer.COLOR_WHITE,
-        bordersize = 0,
-        padding = 0,
-        margin = 0,
-        dimen = self.dimen:copy(),
-        body,
-    }
+    if self.host then
+        -- hosted layout: transparent top band (SimpleUI status bar), white
+        -- content panel, dock at the bottom
+        self[1] = FrameContainer:new{
+            bordersize = 0, padding = 0, margin = 0,
+            dimen = self.dimen:copy(),
+            VerticalGroup:new{
+                align = "left",
+                VerticalSpan:new{ width = self.top_gap or 0 },
+                FrameContainer:new{
+                    background = Blitbuffer.COLOR_WHITE,
+                    bordersize = 0, padding = 0, margin = 0,
+                    width = self.screen_w,
+                    body,
+                },
+                self.dock or VerticalSpan:new{ width = self.bottom_gap or 0 },
+            },
+        }
+    else
+        self[1] = FrameContainer:new{
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = 0,
+            padding = 0,
+            margin = 0,
+            dimen = self.dimen:copy(),
+            body,
+        }
+    end
 end
 
 function ReadStatsView:onShow()
+    if self.host then
+        self:registerHostGestures()
+    end
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
 end
@@ -633,10 +687,12 @@ local M = {}
 function M.show(data, callbacks)
     callbacks = callbacks or {}
     local view = ReadStatsView:new{
+        host = callbacks.host_mode == true,
         data = data,
         on_prev = callbacks.on_prev,
         on_next = callbacks.on_next,
         on_switch = callbacks.on_switch,
+        on_bookshelf = callbacks.on_bookshelf,
     }
     UIManager:show(view)
     return view

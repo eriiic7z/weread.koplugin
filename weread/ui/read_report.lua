@@ -183,18 +183,26 @@ function M:showReadReportBookPicker()
     })
 end
 
-function M:showReadStats()
+function M:showReadStats(host_mode, host_close)
     if not self:requireLogin(false, true) then
         return
     end
-    -- Open on the monthly tab by default.
-    self:loadReadStats("monthly", nil, nil)
+    -- auto-host: hosted overlay (dock/bands) whenever we are NOT inside a
+    -- reader document (reading stats inside a book stays full-screen)
+    if host_mode == nil then
+        local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
+        host_mode = not (ok_r and ReaderUI.instance)
+    end
+    -- Open on the monthly tab by default. host_close (the shelf view opened
+    -- from) is dropped only once the stats data is ready, so no FM flash.
+    self:loadReadStats("monthly", nil, nil, host_mode, host_close)
 end
 
 -- Fetch reading statistics for a period and (re)show the visualization page.
 -- old_view, when provided, is closed once the new data is ready (tab switch or
--- period navigation).
-function M:loadReadStats(mode, base_time, old_view)
+-- period navigation). host_close is closed right before the (re)shown page
+-- when opening hosted from below (shelf dock).
+function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
     self:showBusy(_("Loading reading statistics..."))
     self:runOnlineTask(_("Reading statistics"), function()
         local ok, data = pcall(function()
@@ -209,16 +217,27 @@ function M:loadReadStats(mode, base_time, old_view)
         if old_view then
             UIManager:close(old_view)
         end
+        -- hosted-from-shelf: close the shelf only now, right before showing
+        if host_close then
+            pcall(function() UIManager:close(host_close) end)
+        end
         local view
         view = ReadStatsView.show(data, {
+            host_mode = host_mode,
             on_prev = function()
-                self:loadReadStats(mode, data.prev_base_time, view)
+                self:loadReadStats(mode, data.prev_base_time, view, host_mode)
             end,
             on_next = function()
-                self:loadReadStats(mode, data.next_base_time, view)
+                self:loadReadStats(mode, data.next_base_time, view, host_mode)
             end,
             on_switch = function(new_mode)
-                self:loadReadStats(new_mode, nil, view)
+                self:loadReadStats(new_mode, nil, view, host_mode)
+            end,
+            on_bookshelf = function()
+                -- hosted stats: the shelf's dock "WeRead" item goes back to
+                -- the bookshelf; reopen it through the plugin
+                if view and view.onClose then pcall(function() view:onClose() end) end
+                self:showBookshelf()
             end,
         })
     end)

@@ -24,11 +24,12 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Widget = require("ui/widget/widget")
 local Screen = Device.screen
+local FullscreenHost = require("weread.ui.fullscreen_host")
 local FocusNav = require("weread.ui.focus_nav")
 local I18n = require("weread.lib.i18n")
 local T = require("ffi/util").template
 
-local function _(text) return I18n.tr(text) end
+local function tr(text) return I18n.tr(text) end
 
 local CachedCorner = Widget:extend{
     size = 0,
@@ -186,7 +187,7 @@ function CoverCell:init()
     end
     if not cover_content then
         cover_content = TextWidget:new{
-            text = self.cover_loading and _("Cover loading") or _("No cover"),
+            text = self.cover_loading and tr("Cover loading") or tr("No cover"),
             face = Font:getFace("cfont", 18),
             max_width = image_width,
         }
@@ -230,7 +231,7 @@ function CoverCell:init()
         self._cached_corner_size = corner_size
     end
     local cover = OverlapGroup:new(cover_layers)
-    local title = self.book.title or self.book.bookId or self.book.book_id or _("Untitled")
+    local title = self.book.title or self.book.bookId or self.book.book_id or tr("Untitled")
     local title_widget = TextWidget:new{
         text = title,
         face = Font:getFace("cfont", 18),
@@ -382,7 +383,7 @@ function LibraryView:actionBar()
     -- actions as one compact group aligned right (books adds 筛选)
     -- (personal fork: localized literals; active state shown via bold)
     local search_active = self.keyword and self.keyword ~= ""
-    local filter_active = self.filter_label and self.filter_label ~= _("All")
+    local filter_active = self.filter_label and self.filter_label ~= tr("All")
     local sort_active = self.sort_label and self.sort_label ~= ""
     local actions = {}
     table.insert(actions, {
@@ -428,342 +429,13 @@ function LibraryView:actionBar()
     }
 end
 
--- Bottom dock mirroring the user's SimpleUI bar. Reads simpleui_bar_tabs
--- from the SimpleUI settings file; tapping a non-WeRead tab closes this view
--- and replays the tap on SimpleUI itself (fm._simpleui_plugin:_onTabTap), so
--- navigation + the active indicator stay SimpleUI's own.
-local WEREAD_DOCK_ID = "weread"
-
-local function _sui_store()
-    local ok_ds, DataStorage = pcall(require, "datastorage")
-    if not ok_ds then return nil end
-    local path = DataStorage:getSettingsDir() .. "/simpleui/sui_settings.lua"
-    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-    if not ok_lfs or lfs.attributes(path, "mode") ~= "file" then return nil end
-    local ok_ls, LuaSettings = pcall(require, "luasettings")
-    if not ok_ls then return nil end
-    return LuaSettings:open(path)
-end
-
-function LibraryView:dockTabs()
-    local store = _sui_store()
-    if not store then return nil end
-    if store:readSetting("simpleui_bar_enabled", true) == false then return nil end
-    local tabs = store:readSetting("simpleui_bar_tabs")
-    if type(tabs) ~= "table" or #tabs == 0 then return nil end
-    return tabs
-end
-
--- Resolve the icon FILE for a dock tab id, mirroring SimpleUI's own icon
--- sources. DockCell renders ImageWidget with file=path, so we return the
--- exact SVG file SimpleUI draws (no user-icons copy). nil = text fallback.
-function LibraryView:dockIconFor(id)
-    local ok, DataStorage = pcall(require, "datastorage")
-    if not ok then return nil end
-    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-    if not ok_lfs then return nil end
-    local base = DataStorage:getDataDir()
-    if not base then return nil end
-    local plugins_dir = base .. "/plugins"
-    local sui_icons = plugins_dir .. "/simpleui.koplugin/icons"
-    local source
-    if id:match("^custom_qa_") then
-        -- read the QA's stored icon path (e.g. plugins/simpleui.../plugin.svg)
-        local store = _sui_store()
-        local cfg = store and store:readSetting("simpleui_qa_" .. id)
-        local ic = type(cfg) == "table" and cfg.icon or nil
-        if type(ic) == "string" and ic ~= "" then
-            local cand
-            if ic:match("^plugins/") then
-                cand = base .. "/" .. ic
-            elseif ic:match("^/mnt/") or ic:match("^%.%.?/") or ic:match("%.svg$") then
-                cand = plugins_dir .. "/simpleui.koplugin/icons/plugin.svg"
-            end
-            if cand and lfs.attributes(cand, "mode") == "file" then
-                source = cand
-            end
-        end
-        if not source then
-            source = sui_icons .. "/plugin.svg"
-        end
-    elseif id == "home" or id == "library" then
-        source = sui_icons .. "/library.svg"
-    elseif id == "homescreen" then
-        -- SimpleUI homescreen icon = KOReader mdlight home.svg (not koreader/icons)
-        source = base .. "/resources/icons/mdlight/home.svg"
-    elseif id == "power" then
-        source = sui_icons .. "/power.svg"
-    elseif id == "settings" or id == "sui_settings" then
-        source = sui_icons .. "/settings.svg"
-    elseif id == "history" then
-        source = sui_icons .. "/history.svg"
-    elseif id == "collections" then
-        source = sui_icons .. "/library.svg"
-    end
-    if source and lfs.attributes(source, "mode") == "file" then return source end
-    return nil
-end
-
-local function _dockLabel(tab_id)
-    if tab_id == WEREAD_DOCK_ID then return "微信读书" end
-    if tab_id == "home" then return "书库" end
-    if tab_id == "homescreen" then return "主页" end
-    if tab_id == "history" then return "历史" end
-    if tab_id == "settings" or tab_id == "sui_settings" then return "设置" end
-    if tab_id == "power" then return "电源" end
-    if tab_id == "collections" then return "收藏" end
-    return tab_id
-end
-
--- Dock cell rendered exactly like SimpleUI: CenterContainer + ImageWidget
--- (file, is_icon, alpha) with the active indicator overlaid on top.
-local DockCell = InputContainer:extend{
-    icon = nil,
-    icon_sz = 0,
-    label = nil,
-    active = false,
-    indic_h = 0,
-    dock_cb = nil,
-}
-
-function DockCell:init()
-    self.dimen = Geom:new{ w = self.width, h = self.height }
-    local content
-    if self.icon then
-        content = ImageWidget:new{
-            file = self.icon,
-            width = self.icon_sz,
-            height = self.icon_sz,
-            is_icon = true,
-            alpha = true,
-        }
-    else
-        content = TextWidget:new{
-            text = self.label or "",
-            face = Font:getFace("cfont", 14),
-            bold = self.active,
-        }
-    end
-    local centered = CenterContainer:new{
-        dimen = Geom:new{ w = self.width, h = self.height },
-        content,
-    }
-    if self.active and self.indic_h and self.indic_h > 0 then
-        self[1] = OverlapGroup:new{
-            dimen = Geom:new{ w = self.width, h = self.height },
-            allow_mirroring = false,
-            centered,
-            LineWidget:new{
-                dimen = Geom:new{ w = self.width, h = self.indic_h },
-                background = Blitbuffer.COLOR_BLACK,
-                overlap_offset = { 0, 0 },
-            },
-        }
-    else
-        self[1] = centered
-    end
-    self.ges_events = {
-        TapSelectButton = {
-            GestureRange:new{ ges = "tap", range = self.dimen },
-        },
-    }
-end
-
-function DockCell:onTapSelectButton()
-    if self.dock_cb then self.dock_cb() end
-    return true
-end
-
-function LibraryView:bottomDock(height)
-    if not height or height <= 0 then return nil end
-    local store = _sui_store()
-    local tabs = self:dockTabs()
-    if not tabs then return nil end
-    -- Mirror SimpleUI dock geometry from its settings.
-    local function clamp_pct(key, def, lo, hi)
-        local v = store and tonumber(store:readSetting(key))
-        if not v then return def end
-        return math.max(lo, math.min(hi, v))
-    end
-    local bar_s = clamp_pct("simpleui_bar_size_pct", 100, 50, 150) / 100
-    local icon_s = clamp_pct("simpleui_bar_icon_scale_pct", 100, 50, 200) / 100
-    local bot_pct = clamp_pct("simpleui_bar_bottom_margin_pct", 100, 0, 300)
-    local side_m = Screen:scaleBySize(24)
-    local indicator_h = math.max(1, math.floor(Screen:scaleBySize(3) * bar_s))
-    local icon_sz = math.max(10, math.floor(Screen:scaleBySize(44) * bar_s * icon_s))
-    -- Same three-band sandwich as SimpleUI: TOP_SP/sep, BAR_H content,
-    -- BOT_SP padding. height (from ui_reserved_bands) = BAR_H + TOP_SP + BOT_SP.
-    local top_sp = Screen:scaleBySize(2)
-    local bot_sp = math.floor(Screen:scaleBySize(12) * bot_pct / 100)
-    local sep_h = Screen:scaleBySize(1)
-    local pad_above = math.max(0, top_sp - sep_h)
-    local bar_h = math.max(1, height - top_sp - bot_sp)
-    local usable_w = math.max(1, self.screen_w - 2 * side_m)
-    -- Resolve the display order, remembering each raw SimpleUI id.
-    local resolved = {}
-    local raw = {}
-    for _, id in ipairs(tabs) do
-        if id and id:match("^custom_qa_") then
-            resolved[#resolved + 1] = WEREAD_DOCK_ID
-        else
-            resolved[#resolved + 1] = id
-        end
-        raw[#raw + 1] = id
-    end
-    if #resolved == 0 then return nil end
-    local cell_w = math.floor(usable_w / #resolved)
-    self._dock_tabs = {}
-    local row = HorizontalGroup:new{}
-    for index, id in ipairs(resolved) do
-        local is_weread = id == WEREAD_DOCK_ID
-        local width = index == #resolved and usable_w - cell_w * (#resolved - 1) or cell_w
-        local icon = self:dockIconFor(raw[index])
-        -- SimpleUI-identical cell: CenterContainer + ImageWidget(file) with
-        -- the active indicator overlaid on top; DockCell handles the tap.
-        local cell = DockCell:new{
-            width = width,
-            height = bar_h,
-            icon = icon,
-            icon_sz = icon_sz,
-            label = _dockLabel(id),
-            active = is_weread,
-            indic_h = is_weread and indicator_h or 0,
-            dock_cb = function() self:onDockTap(id) end,
-            show_parent = self,
-        }
-        if not is_weread then self._dock_tabs[#self._dock_tabs + 1] = { id = id } end
-        row[#row + 1] = cell
-    end
-    local sep_bg = Blitbuffer.COLOR_GRAY
-    pcall(function() sep_bg = Blitbuffer.gray(0.72) end)
-    return FrameContainer:new{
-        background = Blitbuffer.COLOR_WHITE,
-        bordersize = 0, padding = 0, margin = 0,
-        width = self.screen_w,
-        height = height,
-        padding_left = side_m,
-        padding_right = side_m,
-        VerticalGroup:new{
-            align = "left",
-            VerticalSpan:new{ width = pad_above },
-            LineWidget:new{
-                dimen = Geom:new{ w = usable_w, h = sep_h },
-                background = sep_bg,
-            },
-            row,
-            VerticalSpan:new{ width = bot_sp },
-        },
-    }
-end
-
-function LibraryView:onDockTap(tab_id)
-    -- WeRead's own dock entry: already here, nothing to do.
-    if tab_id == WEREAD_DOCK_ID then return true end
-    -- Power is an in-place action (same as SimpleUI): show the power menu
-    -- right here, no navigation, no closing this view.
-    if tab_id == "power" then
-        self:showPowerDialog()
-        return true
-    end
-
-    local ok, FM = pcall(require, "apps/filemanager/filemanager")
-    local fm = ok and FM.instance
-    local plugin = fm and fm._simpleui_plugin
-    local function replay()
-        if plugin and type(plugin._onTabTap) == "function" then
-            pcall(plugin._onTabTap, plugin, tab_id, fm)
-        end
-    end
-    local function close_self()
-        pcall(function() self:onClose() end)
-    end
-
-    if tab_id == "home" or tab_id == "sui_settings"
-        or tab_id == "settings" or tab_id == "history" then
-        -- Navigation targets owned by SimpleUI: close this view first (back
-        -- to the SimpleUI screen WeRead was opened from), then replay the tap
-        -- on the real FM so SimpleUI navigates with its own transition.
-        close_self()
-        UIManager:scheduleIn(0, replay)
-        return true
-    end
-    if tab_id == "homescreen" then
-        -- SimpleUI pushes its Home Screen above this view, then we drop
-        -- ourselves underneath it: direct transition, no library flash.
-        replay()
-        close_self()
-        return true
-    end
-    -- Anything else: close first, then replay on the real FM immediately.
-    close_self()
-    UIManager:scheduleIn(0, replay)
-    return true
-end
-
--- In-place power menu, mirroring SimpleUI's _showPowerDialog (ButtonDialog,
--- 42%% width, Device-capability driven) but shown over this view; no
--- navigation, no dependency on the SimpleUI FM environment.
-function LibraryView:showPowerDialog()
-    if self._weread_power_dialog then return end -- ignore double taps
-    local ButtonDialog = require("ui/widget/buttondialog")
-    local Event = require("ui/event")
-    local dialog_w = math.floor(Screen:getWidth() * 0.42)
-    local function _clear()
-        self._weread_power_dialog = nil
-    end
-    local buttons = {}
-    if Device:canRestart() then
-        buttons[#buttons + 1] = {{ text = "重启", callback = function()
-            local d = self._weread_power_dialog
-            self._weread_power_dialog = nil
-            UIManager:close(d)
-            UIManager:broadcastEvent(Event:new("Restart"))
-        end }}
-    end
-    if Device:canReboot() then
-        buttons[#buttons + 1] = {{ text = "重新引导", callback = function()
-            local d = self._weread_power_dialog
-            self._weread_power_dialog = nil
-            UIManager:close(d)
-            UIManager:askForReboot()
-        end }}
-    end
-    if Device:canSuspend() then
-        buttons[#buttons + 1] = {{ text = "休眠", callback = function()
-            local d = self._weread_power_dialog
-            self._weread_power_dialog = nil
-            UIManager:close(d)
-            UIManager:flushSettings()
-            UIManager:suspend()
-        end }}
-    end
-    buttons[#buttons + 1] = {{ text = "退出", callback = function()
-        local d = self._weread_power_dialog
-        self._weread_power_dialog = nil
-        UIManager:close(d)
-        -- Order matters: broadcast Exit FIRST so the FileManager tears down
-        -- while this view still covers it (no FM re-render), then drop this
-        -- view to empty the stack. Measured: this whole path is ~0.15s; the
-        -- remaining exit time is KOReader's own teardown.
-        UIManager:broadcastEvent(Event:new("Exit"))
-        pcall(function() self:onClose() end)
-    end }}
-    self._weread_power_dialog = ButtonDialog:new{
-        width = dialog_w,
-        tap_close_callback = _clear,
-        onCloseWidget = _clear,
-        buttons = buttons,
-    }
-    UIManager:show(self._weread_power_dialog)
-end
-
 function LibraryView:itemStatus(book)
     if self.mode == "public_account" then return book.author or "" end
     local status = ""
     if book.readUpdateTime and book.readUpdateTime > 0 then
         status = os.date("%Y-%m-%d", book.readUpdateTime)
     elseif book.finishReading == 1 then
-        status = _("Done")
+        status = tr("Done")
     end
     if book._cached then
         status = status ~= "" and ("✓  " .. status) or "✓"
@@ -801,7 +473,7 @@ function LibraryView:content()
     if #source == 0 then
         table.insert(content, VerticalSpan:new{ width = Size.padding.large })
         table.insert(content, TextWidget:new{
-            text = self.keyword and self.keyword ~= "" and _("No shelf matches.") or _("No items."),
+            text = self.keyword and self.keyword ~= "" and tr("No shelf matches.") or tr("No items."),
             face = Font:getFace("cfont", 20),
             max_width = self.content_width,
         })
@@ -857,7 +529,7 @@ function LibraryView:content()
         for index = first, last do
             local book = source[index]
             local shelf_row = ShelfRow:new{
-                text = book.title or book.bookId or book.book_id or _("Untitled"),
+                text = book.title or book.bookId or book.book_id or tr("Untitled"),
                 status = self:itemStatus(book),
                 width = self.list_width,
                 font_size = self.mode == "books" and 20 or 22,
@@ -886,7 +558,7 @@ function LibraryView:pageBar()
     local cell_w = math.floor(self.screen_w / 3)
     local button_height = Screen:scaleBySize(54)
     local previous = Button:new{
-        text = _("Previous"), width = cell_w, height = button_height,
+        text = tr("Previous"), width = cell_w, height = button_height,
         text_font_size = 22, text_font_bold = true, radius = 0, margin = 0,
         bordersize = 0, enabled = self.page > 1, show_parent = self,
         callback = function()
@@ -896,13 +568,13 @@ function LibraryView:pageBar()
         end,
     }
     local page_text = Button:new{
-        text = T(_("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
+        text = T(tr("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
         width = cell_w, height = button_height, text_font_size = 18,
         radius = 0, margin = 0, bordersize = 0,
         enabled = false, show_parent = self,
     }
     local next_page = Button:new{
-        text = _("Next"), width = self.screen_w - 2 * cell_w,
+        text = tr("Next"), width = self.screen_w - 2 * cell_w,
         height = button_height, text_font_size = 22, text_font_bold = true,
         radius = 0, margin = 0, bordersize = 0,
         enabled = self.page < self.page_count, show_parent = self,
@@ -916,49 +588,38 @@ function LibraryView:pageBar()
     return HorizontalGroup:new{ previous, page_text, next_page }
 end
 
--- Reserve the exact SimpleUI top status bar / bottom nav bar heights by
--- mirroring sui_topbar.lua & sui_bottombar.lua formulas and reading the
--- SimpleUI settings file (no cross-plugin require). Returns top, bottom.
-local function read_sui_pct(store, key, def, lo, hi)
-    if not store then return def end
-    local v = tonumber(store:readSetting(key))
-    if not v then return def end
-    return math.max(lo, math.min(hi, math.floor(v)))
-end
-
-local function ui_reserved_bands()
-    local ok_ds, DataStorage = pcall(require, "datastorage")
-    if not ok_ds then return 0, 0 end
-    local path = DataStorage:getSettingsDir() .. "/simpleui/sui_settings.lua"
-    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-    if not ok_lfs or lfs.attributes(path, "mode") ~= "file" then return 0, 0 end
-    local ok_ls, LuaSettings = pcall(require, "luasettings")
-    if not ok_ls then return 0, 0 end
-    local store = LuaSettings:open(path)
-    -- top status bar: TOTAL_TOP_H = floor(FS_TITLE(22)*s) + pads
-    local top = 0
-    if store and store:readSetting("simpleui_topbar_enabled", true) ~= false then
-        local s = read_sui_pct(store, "simpleui_topbar_size_pct", 100, 50, 150) / 100
-        top = math.floor(22 * s)
-            + math.floor(Screen:scaleBySize(20) * s)
-            + math.floor(Screen:scaleBySize(8) * s)
-    end
-    -- bottom nav bar: BAR_H(scaleBySize(96)*s) + TOP_SP(2) + BOT_SP(12*b)
-    local bar = 0
-    if store and store:readSetting("simpleui_bar_enabled", true) ~= false then
-        local s = read_sui_pct(store, "simpleui_bar_size_pct", 100, 50, 150) / 100
-        local b = read_sui_pct(store, "simpleui_bar_bottom_margin_pct", 100, 0, 300) / 100
-        bar = math.floor(Screen:scaleBySize(96) * s)
-            + Screen:scaleBySize(2)
-            + math.floor(Screen:scaleBySize(12) * b)
-    end
-    return top, bar
-end
-
 function LibraryView:init()
+    -- Reusable full-screen host: SimpleUI reserved bands + dock (tabs/icons
+    -- from SimpleUI's own registry) + frontlight edge gestures + top-edge
+    -- native menu gestures. The dock entry that points at this plugin gets
+    -- the active indicator and its label.
+    FullscreenHost.install(self, {
+        -- this dock's "bookshelf" item = the SimpleUI QA pointing at the
+        -- weread plugin (launch); it gets the active indicator
+        dock_highlight = function(_v, _i, cfg)
+            return cfg ~= nil and cfg.plugin_key == "weread"
+                and cfg.plugin_method == "launch"
+        end,
+        -- family-internal navigation: WeRead-launch item = current page
+        -- (no-op); the reading-statistics dispatcher item switches to the
+        -- stats page without leaving the host or going through SimpleUI
+        dock_nav = function(view, _i, cfg)
+            if cfg and cfg.plugin_key == "weread" then
+                return true
+            end
+            if cfg and cfg.dispatcher_action == "weread_reading_statistics" then
+                -- family switch: open the stats page hosted; the shelf view
+                -- is passed along and closed by the stats loader only once
+                -- its data is ready (no FM/home flash in between)
+                if view.on_stats then view.on_stats(view) end
+                return true
+            end
+            return false
+        end,
+    })
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
-    local top_gap, bottom_gap = ui_reserved_bands()
+    local top_gap, bottom_gap = self:reservedBands()
     -- Full-screen viewport; the top/bottom bands below are left transparent
     -- (spacers), so the SimpleUI top status bar and bottom nav bar of the
     -- FileManager underneath stay visible. The white panel only wraps the
@@ -972,7 +633,7 @@ function LibraryView:init()
 
     self.title_bar = TitleBar:new{
         width = self.screen_w,
-        title = self.title or _("WeRead Bookshelf"),
+        title = self.title or tr("WeRead Bookshelf"),
         title_face = Font:getFace("tfont", 28),
         align = "center",
         with_bottom_line = true,
@@ -1062,107 +723,11 @@ end
 -- on the left edge, and two-finger north/south anywhere, adjust the
 -- frontlight with the same delta curve and on/off boundary as
 -- DeviceListener (calculateGestureDelta).
-function LibraryView:onFrontlightSwipe(ges)
-    if not Device:hasFrontlight() then return false end
-    local dir = type(ges) == "table" and ges.direction or nil
-    local direction
-    if dir == "north" then direction = 1
-    elseif dir == "south" then direction = -1 end
-    if not direction then return false end -- only vertical gestures adjust light
-    local powerd = Device:getPowerDevice()
-    local fl_max = tonumber(powerd.fl_max) or 1
-    local gestureScale = Screen:getHeight() * 0.8 -- swipe/two-finger multiplier
-    local x = math.min(1, (tonumber(ges.distance) or 1) / gestureScale)
-    local delta_int = math.ceil(0.5 * fl_max * x * x)
-    local new_intensity = powerd:frontlightIntensity() + direction * delta_int
-    if new_intensity <= 0 then
-        powerd:turnOffFrontlight()
-    else
-        powerd:setIntensity(new_intensity)
-    end
-    if powerd.updateResumeFrontlightState then
-        pcall(powerd.updateResumeFrontlightState, powerd)
-    end
-    if new_intensity <= 0 then
-        local ok_n, Notification = pcall(require, "ui/widget/notification")
-        if ok_n and Notification then
-            Notification:notify("前光已关闭", Notification.SOURCE_ALWAYS_SHOW)
-        end
-    else
-        local ok_n, Notification = pcall(require, "ui/widget/notification")
-        if ok_n and Notification then
-            Notification:notify(
-                "前光亮度已设为 " .. tostring(powerd:frontlightIntensity()) .. "。",
-                Notification.SOURCE_ALWAYS_SHOW)
-        end
-    end
-    return true
-end
-
 function LibraryView:onShow()
-    -- Top edge interactions replicate the native FileManager zones verbatim:
-    -- DTAP_ZONE_MENU (top 1/8 of the screen, full width, tap + swipe) and
-    -- DTAP_ZONE_MENU_EXT (middle half of the top 1/5). Menu zones are listed
-    -- first so the top-left corner belongs to the menu, not the frontlight.
-    -- The left-edge frontlight swipe (KOReader style) then covers the rest of
-    -- the left 1/8 below the menu band.
-    self:registerTouchZones({
-        {
-            id = "wr_top_tap_menu",
-            ges = "tap",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 / 8 },
-            handler = function(ges) return self:onTopTapMenu(ges) end,
-        },
-        {
-            id = "wr_top_swipe_menu",
-            ges = "swipe",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 / 8 },
-            handler = function(ges) return self:onTopSwipeMenu(ges) end,
-        },
-        {
-            id = "wr_top_swipe_menu_ext",
-            ges = "swipe",
-            screen_zone = { ratio_x = 1 / 4, ratio_y = 0, ratio_w = 2 / 4, ratio_h = 1 / 5 },
-            handler = function(ges) return self:onTopSwipeMenu(ges) end,
-        },
-        {
-            id = "wr_fl_left_edge",
-            ges = "swipe",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1 / 8, ratio_h = 1 },
-            handler = function(ges) return self:onFrontlightSwipe(ges) end,
-        },
-        {
-            id = "wr_fl_two_finger",
-            ges = "two_finger_swipe",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
-            handler = function(ges) return self:onFrontlightSwipe(ges) end,
-        },
-    })
+    -- Host gestures: top-edge native menu + frontlight swipes
+    self:registerHostGestures()
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
-end
-
--- Native FileManager top-edge interactions: tapping the top 1/8 (or
--- swiping down from the top 1/8 / middle EXT band) opens the FileManager
--- TouchMenu. FileManagerMenu itself remembers the last-used tab
--- (filemanagermenu_tab_index), so re-triggering reopens what was last open.
--- We forward to FM's own handlers so activation_menu settings are honoured.
-function LibraryView:onTopTapMenu(ges)
-    local ok, FM = pcall(require, "apps/filemanager/filemanager")
-    local menu = ok and FM.instance and FM.instance.menu
-    if menu and type(menu.onTapShowMenu) == "function" then
-        return pcall(menu.onTapShowMenu, menu, ges)
-    end
-    return false
-end
-
-function LibraryView:onTopSwipeMenu(ges)
-    local ok, FM = pcall(require, "apps/filemanager/filemanager")
-    local menu = ok and FM.instance and FM.instance.menu
-    if menu and type(menu.onSwipeShowMenu) == "function" then
-        return pcall(menu.onSwipeShowMenu, menu, ges)
-    end
-    return false
 end
 
 function LibraryView:onCloseWidget()
@@ -1200,6 +765,7 @@ function M.show(data, callbacks)
         on_refresh = callbacks.on_refresh,
         on_sort = callbacks.on_sort,
         on_filter = callbacks.on_filter,
+        on_stats = callbacks.on_stats,
         on_select = callbacks.on_select,
         on_page_changed = callbacks.on_page_changed,
     }

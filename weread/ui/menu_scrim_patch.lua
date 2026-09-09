@@ -41,14 +41,20 @@ local function patch_menu_class(cls, show_name, close_name, scrim_key)
         return orig_show(self, tab_index, do_not_show)
     end
     cls[close_name] = function(self, ...)
+        local ok_l, logger = pcall(require, "logger")
+        if ok_l then logger.info("wrScrim: close-hook enter scrim=" .. tostring(self[scrim_key] ~= nil)) end
         if self[scrim_key] then
             UIManager:close(self[scrim_key])
             self[scrim_key] = nil
             -- non-flashing full refresh: clears the veil everywhere on the
             -- e-ink display (closing widgets only refresh their own region)
             UIManager:setDirty(nil, "partial")
+            if ok_l then logger.info("wrScrim: close-hook scrim dropped") end
         end
-        return orig_close(self, ...)
+        if ok_l then logger.info("wrScrim: close-hook calling orig") end
+        local r = orig_close(self, ...)
+        if ok_l then logger.info("wrScrim: close-hook orig returned") end
+        return r
     end
     logger.info("wrScrim: patched " .. show_name)
     return true
