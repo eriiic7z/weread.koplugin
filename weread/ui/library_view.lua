@@ -232,13 +232,52 @@ function CoverCell:init()
     end
     local cover = OverlapGroup:new(cover_layers)
     local title = self.book.title or self.book.bookId or self.book.book_id or tr("Untitled")
-    -- book-name parity with the FM list-row text (本地书库): smallinfofont
-    -- regular weight at the FM rows' derived size (19 on this device)
+    -- book title below the cover: 15px bold (local-bookshelf mosaic title
+    -- spec, FS_DETAIL); single line, long names truncate with ellipsis
     local title_widget = TextWidget:new{
         text = title,
-        face = Font:getFace("smallinfofont", 19),
+        face = Font:getFace("smallinfofont", 15),
+        bold = true,
         max_width = cover_width,
     }
+    -- author line under the title: 12px, regular weight (two sizes smaller)
+    local author_widget
+    local author_name = self.book.author or ""
+    if author_name ~= "" then
+        author_widget = TextWidget:new{
+            text = author_name,
+            face = Font:getFace("smallinfofont", 12),
+            max_width = cover_width,
+        }
+    end
+    -- Absolute layout: KOReader line boxes are taller than their glyphs, so
+    -- stacking title/author TextWidgets leaves extra visible white. Lay them
+    -- out by hand: cover→title keeps a small gap; the author line is pulled
+    -- up into the title's empty descender space to tighten the line spacing.
+    local gap_c = Screen:scaleBySize(2)
+    local author_pull = Screen:scaleBySize(3)
+    local have_author = author_widget ~= nil
+    local title_sz = title_widget:getSize()
+    local author_sz = have_author and author_widget:getSize() or nil
+    local total_h = cover_height + gap_c + title_sz.h
+        + (have_author and (author_sz.h - author_pull) or 0)
+    local y_cover = math.max(0, math.floor((self.height - total_h) / 2))
+    local y_title = y_cover + cover_height + gap_c
+    local y_author = y_title + title_sz.h - author_pull
+    local function cx(w) return math.max(0, math.floor((self.width - w) / 2)) end
+    cover.overlap_offset = { cx(cover_width), y_cover }
+    title_widget.overlap_offset = { cx(title_sz.w), y_title }
+    local layers = {
+        dimen = Geom:new{ w = self.width, h = self.height },
+        allow_mirroring = false,
+        cover,
+        title_widget,
+    }
+    if have_author then
+        author_widget.overlap_offset = { cx(author_sz.w), y_author }
+        layers[#layers + 1] = author_widget
+    end
+    local cell = OverlapGroup:new(layers)
     self.frame = FrameContainer:new{
         bordersize = 0,
         radius = 0,
@@ -246,14 +285,7 @@ function CoverCell:init()
         padding = 0,
         background = Blitbuffer.COLOR_WHITE,
         show_parent = self.show_parent,
-        CenterContainer:new{
-            dimen = Geom:new{ w = self.width, h = self.height },
-            VerticalGroup:new{
-                align = "center",
-                cover,
-                title_widget,
-            },
-        },
+        cell,
     }
     self[1] = self.frame
     self.dimen = self.frame:getSize()
@@ -500,6 +532,9 @@ function LibraryView:content()
         last = math.min(#source, first + self.page_size - 1)
     end
     if self.cover_mode and self.mode == "books" then
+        -- the added author line pushed the grid up against the tab underline;
+        -- restore the previous headroom with a leading spacer
+        table.insert(content, VerticalSpan:new{ width = Screen:scaleBySize(12) })
         local columns = math.max(1, math.floor(tonumber(self.cover_columns) or 3))
         local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
         -- the grid as a whole is inset on both sides by the dock separator's
@@ -618,14 +653,14 @@ function LibraryView:init()
     FullscreenHost.install(self, {
         -- this dock's "bookshelf" item = the SimpleUI QA pointing at the
         -- weread plugin (launch); it gets the active indicator
-        dock_highlight = function(_v, _i, cfg)
+        dock_highlight = function(_, _, cfg)
             return cfg ~= nil and cfg.plugin_key == "weread"
                 and cfg.plugin_method == "launch"
         end,
         -- family-internal navigation: WeRead-launch item = current page
         -- (no-op); the reading-statistics dispatcher item switches to the
         -- stats page without leaving the host or going through SimpleUI
-        dock_nav = function(view, _i, cfg)
+        dock_nav = function(view, _, cfg)
             if cfg and cfg.plugin_key == "weread" then
                 return true
             end
@@ -642,6 +677,9 @@ function LibraryView:init()
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
     local top_gap, bottom_gap = self:reservedBands()
+    -- pull the whole header block up: reserve 10px less of the top band
+    -- (scroll area grows by the same amount, so the dock/bottom band stay flush)
+    top_gap = math.max(0, top_gap - Screen:scaleBySize(10))
     -- Full-screen viewport; the top/bottom bands below are left transparent
     -- (spacers), so the SimpleUI top status bar and bottom nav bar of the
     -- FileManager underneath stay visible. The white panel only wraps the
@@ -659,7 +697,7 @@ function LibraryView:init()
     self.title_bar = TitleBar:new{
         width = self.screen_w,
         title = self.title or tr("WeRead"),
-        title_face = Font:getFace("smalltfont"), -- FM(书库) title parity: same face/size as FM TitleBar
+        title_face = Font:getFace("smalltfont", 26), -- shelf title: smalltfont, bumped +2 over FM's 24
         title_top_padding = Screen:scaleBySize(6), -- same vertical padding as FM TitleBar → same title height
         align = "center",
         with_bottom_line = false, -- the bottom line below is drawn by title_sep
