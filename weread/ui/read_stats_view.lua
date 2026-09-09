@@ -11,7 +11,8 @@
 -- is pinned to exactly content_width with a zero-height spacer.
 --
 -- Layout:
---   [TitleBar: mode · period, close]
+--   [TitleBar: mode · period (no close button)]
+--   [title separator]
 --   [Tab bar: 周 / 月 / 年 / 总]
 --   [ScrollableContainer]
 --     ├─ Overview card (total time / days / average / compare / rank / summary)
@@ -452,7 +453,9 @@ end
 
 function ReadStatsView:buildTabBar()
     local n = #TABS
-    local cell_w = math.floor(self.screen_w / n)
+    -- tabs span the same width as the cards (24px inset each side)
+    local side = Screen:scaleBySize(24)
+    local cell_w = math.floor((self.screen_w - 2 * side) / n)
     local row = HorizontalGroup:new{}
     self._tab_buttons = {}
     for _, tab in ipairs(TABS) do
@@ -463,9 +466,13 @@ function ReadStatsView:buildTabBar()
             radius = 0,
             margin = 0,
             bordersize = Size.border.thin,
-            background = Blitbuffer.COLOR_WHITE,
+            -- no background: KOReader forces ROUNDED corners on the tap
+            -- highlight whenever a Button has a background → keeps the
+            -- fixed & tap highlights both square (bookshelf style)
             preselect = active,
             text_font_bold = active,
+            text_font_size = 18, -- tab labels two sizes smaller
+            padding_v = Screen:scaleBySize(1), -- bookshelf control-height ratio
             show_parent = self,
             callback = function() self:onSwitchMode(tab.mode) end,
         }
@@ -480,7 +487,12 @@ function ReadStatsView:buildTabBar()
         end
         table.insert(row, button)
     end
-    return FrameContainer:new{ bordersize = 0, padding = 0, margin = 0, row }
+    return FrameContainer:new{
+        bordersize = 0, padding = 0, margin = 0,
+        padding_left = side,
+        padding_right = side,
+        row,
+    }
 end
 
 function ReadStatsView:buildNavRow()
@@ -489,27 +501,32 @@ function ReadStatsView:buildNavRow()
         self._nav_buttons = {}
         return nil
     end
-    local gap = Size.padding.default
-    local btn_w = math.floor((self.screen_w - 3 * gap) / 2)
-    local prev_button = Button:new{
-        text = tr("‹ Previous"), width = btn_w, show_parent = self,
-        enabled = d.allow_prev == true,
-        callback = function() self:onPrevPeriod() end,
-    }
-    local next_button = Button:new{
-        text = tr("Next ›"), width = btn_w, show_parent = self,
-        enabled = d.allow_next == true,
-        callback = function() self:onNextPeriod() end,
-    }
+    -- bookshelf rule: button height = text line + small vertical padding
+    local pad_v = Screen:scaleBySize(1)
+    local function mk(text, enabled, cb)
+        return Button:new{
+            text = text, text_font_size = 16, text_font_bold = false,
+            padding_v = pad_v, radius = 0, margin = 0, bordersize = 0,
+            show_parent = self, enabled = enabled, callback = cb,
+        }
+    end
+    local prev_button = mk(tr("‹ Previous"), d.allow_prev == true,
+        function() self:onPrevPeriod() end)
+    local next_button = mk(tr("Next ›"), d.allow_next == true,
+        function() self:onNextPeriod() end)
     self._nav_buttons = { prev_button, next_button }
+    local group = HorizontalGroup:new{
+        prev_button,
+        HorizontalSpan:new{ width = Screen:scaleBySize(8) },
+        next_button,
+    }
+    local gh = math.max(1, group:getSize().h)
     return FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
-        bordersize = 0,
-        padding = gap,
-        HorizontalGroup:new{
-            prev_button,
-            HorizontalSpan:new{ width = gap },
-            next_button,
+        bordersize = 0, padding = 0, margin = 0,
+        CenterContainer:new{
+            dimen = Geom:new{ w = self.screen_w, h = gh },
+            group,
         },
     }
 end
@@ -540,6 +557,9 @@ function ReadStatsView:init()
             end,
         })
         self.top_gap, self.bottom_gap = self:reservedBands()
+        -- same top lift as the bookshelf so the stats title sits at the same
+        -- height as the 微信读书 shelf title
+        self.top_gap = math.max(0, self.top_gap - Screen:scaleBySize(10))
         self.covers_fullscreen = false
         self.dock = self:bottomDock(self.bottom_gap)
     else
@@ -551,10 +571,12 @@ function ReadStatsView:init()
     self.outer_margin = Size.padding.large
     self.card_border = Size.border.window
     self.card_padding = Size.padding.large
-    local scrollbar_reserve = 3 * Screen:scaleBySize(6)
-    local usable_w = self.screen_w - scrollbar_reserve - 2 * self.outer_margin
-    self.card_width = usable_w
-    self.content_width = usable_w - 2 * self.card_border - 2 * self.card_padding
+    -- Cards share the bookshelf cover grid's side geometry: 24px in from the
+    -- screen edges on both sides (scrollbar sits clear of that inset).
+    local side_inset = Screen:scaleBySize(24)
+    self.card_width = math.max(1, self.screen_w - 2 * side_inset)
+    self.content_width = math.max(1, self.card_width
+        - 2 * self.card_border - 2 * self.card_padding)
 
     if Device:hasKeys() then
         self.key_events.Close = { { Device.input.group.Back } }
@@ -568,9 +590,11 @@ function ReadStatsView:init()
         width = self.screen_w,
         title = title,
         title_multilines = true,
+        title_face = Font:getFace("smalltfont", 26), -- same face/size as the bookshelf title
+        title_top_padding = Screen:scaleBySize(6),    -- same vertical padding too
         align = "center",
-        with_bottom_line = true,
-        close_callback = function() self:onClose() end,
+        with_bottom_line = false, -- no bottom line / separator below the title
+        -- X close button removed (bookshelf style): Back key / dock nav close
         show_parent = self,
     }
 
@@ -582,6 +606,7 @@ function ReadStatsView:init()
     FocusNav.apply(self, rows)
     FocusNav.initialFocus(self, 1, 1)
 
+    -- no title separator line: tab row sits directly under the title
     local top_h = self.title_bar:getHeight() + tab_bar:getSize().h
     local nav_h = nav_row and nav_row:getSize().h or 0
     local vreserve = 0
@@ -594,7 +619,7 @@ function ReadStatsView:init()
         dimen = Geom:new{ w = self.screen_w, h = scroll_h },
         show_parent = self,
         HorizontalGroup:new{
-            HorizontalSpan:new{ width = self.outer_margin },
+            HorizontalSpan:new{ width = Screen:scaleBySize(24) },
             VerticalGroup:new{
                 align = "left",
                 VerticalSpan:new{ width = self.outer_margin },
@@ -604,8 +629,32 @@ function ReadStatsView:init()
         },
     }
     self.scroll = scroll
+    -- halve the scrollbar width vs the stock default (6 → 3 scale units)
+    scroll.scroll_bar_width = math.max(1, math.floor(Screen:scaleBySize(6) / 2))
+    -- scrollbar is created lazily at first paint (paintTo → initState), so hook
+    -- initState to colour the bar the moment it exists
+    local orig_init_state = scroll.initState
+    scroll.initState = function(s)
+        orig_init_state(s)
+        local bar = s._v_scroll_bar
+        if bar then
+            local g = Blitbuffer.gray(0.25) -- gray 0.25
+            bar.bordercolor = g
+            bar.rectcolor = g
+            -- the half-width bar sits flush against the device bezel; nudge it
+            -- left so it reads as a margin, not a screen edge
+            local shift = Screen:scaleBySize(8)
+            local orig_paint = bar.paintTo
+            bar.paintTo = function(bs, bb, bx, by)
+                orig_paint(bs, bb, bx - shift, by)
+            end
+        end
+    end
+    self:applyScrollbarColor()
 
-    local body = VerticalGroup:new{ align = "left", self.title_bar, tab_bar, scroll }
+    local body = VerticalGroup:new{
+        align = "left", self.title_bar, tab_bar, scroll,
+    }
     if nav_row then
         table.insert(body, nav_row)
     end
@@ -640,10 +689,22 @@ function ReadStatsView:init()
     end
 end
 
+--- Scrollbar appears/updates only after layout, so re-apply the light colour
+--- on show too, not just at construction.
+function ReadStatsView:applyScrollbarColor()
+    local bar = self.scroll and self.scroll._v_scroll_bar
+    if bar then
+        local g = Blitbuffer.gray(0.25) -- gray 0.25
+        bar.bordercolor = g
+        bar.rectcolor = g
+    end
+end
+
 function ReadStatsView:onShow()
     if self.host then
         self:registerHostGestures()
     end
+    self:applyScrollbarColor()
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
 end
