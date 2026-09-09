@@ -232,9 +232,11 @@ function CoverCell:init()
     end
     local cover = OverlapGroup:new(cover_layers)
     local title = self.book.title or self.book.bookId or self.book.book_id or tr("Untitled")
+    -- book-name parity with the FM list-row text (本地书库): smallinfofont
+    -- regular weight at the FM rows' derived size (19 on this device)
     local title_widget = TextWidget:new{
         text = title,
-        face = Font:getFace("cfont", 18),
+        face = Font:getFace("smallinfofont", 19),
         max_width = cover_width,
     }
     self.frame = FrameContainer:new{
@@ -322,12 +324,14 @@ function LibraryView:tabBar()
             radius = 0,
             margin = 0,
             bordersize = 0,
-            background = Blitbuffer.COLOR_WHITE,
+            -- no background: KOReader forces ROUNDED corners on the tap
+            -- highlight whenever a Button has a background, so leave it nil
+            -- to get the square highlight (直角矩形)
             text_font_size = 18,
             text_font_bold = true,
             enabled = enabled,
-            padding_h = Screen:scaleBySize(8),
-            padding_v = Screen:scaleBySize(2),
+            padding_h = Screen:scaleBySize(6),
+            padding_v = Screen:scaleBySize(1),
             show_parent = self,
             callback = function()
                 if enabled and not active and self.on_switch then
@@ -340,11 +344,16 @@ function LibraryView:tabBar()
         local b_w = math.max(1, button:getSize().w)
         table.insert(row, VerticalGroup:new{
             align = "left",
+            VerticalSpan:new{ width = Screen:scaleBySize(3) }, -- keep tap highlight clear of the title separator
             button,
+            -- active underline: same 1px thickness as the bottom dock
+            -- separator (active state kept via colour only); spaced below
+            -- the button so the tap highlight never touches it
+            VerticalSpan:new{ width = Screen:scaleBySize(4) },
             LineWidget:new{
                 dimen = Geom:new{
                     w = b_w,
-                    h = active and Screen:scaleBySize(3) or 1,
+                    h = Screen:scaleBySize(1),
                 },
                 background = active and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
             },
@@ -364,7 +373,10 @@ function LibraryView:toolRow()
     local tw = math.max(1, tab_group:getSize().w)
     local aw = math.max(1, actions:getSize().w)
     local h = math.max(th, ah)
-    local gap_w = math.max(0, self.screen_w - tw - aw)
+    -- tab group inset by the dock separator's own side margin, so the tabs
+    -- align with the cover grid and the bottom dock divider
+    local side_m = Screen:scaleBySize(24)
+    local gap_w = math.max(0, self.screen_w - side_m - tw - aw)
     local row = HorizontalGroup:new{
         align = "center",
         tab_group,
@@ -375,6 +387,7 @@ function LibraryView:toolRow()
         bordersize = 0, padding = 0, margin = 0,
         width = self.screen_w,
         height = h,
+        padding_left = side_m,
         row,
     }
 end
@@ -387,6 +400,14 @@ function LibraryView:actionBar()
     local sort_active = self.sort_label and self.sort_label ~= ""
     local actions = {}
     table.insert(actions, {
+        text = "刷新", bold = false,
+        cb = function() if self.on_refresh then self.on_refresh() end end,
+    })
+    table.insert(actions, {
+        text = "搜索", bold = search_active,
+        cb = function() if self.on_search then self.on_search() end end,
+    })
+    table.insert(actions, {
         text = "排序", bold = sort_active,
         cb = function() if self.on_sort then self.on_sort() end end,
     })
@@ -396,14 +417,6 @@ function LibraryView:actionBar()
             cb = function() if self.on_filter then self.on_filter() end end,
         })
     end
-    table.insert(actions, {
-        text = "搜索", bold = search_active,
-        cb = function() if self.on_search then self.on_search() end end,
-    })
-    table.insert(actions, {
-        text = "刷新", bold = false,
-        cb = function() if self.on_refresh then self.on_refresh() end end,
-    })
     local gap = HorizontalSpan:new{ width = Screen:scaleBySize(8) }
     local row = HorizontalGroup:new{}
     self._action_secondary = {}
@@ -421,10 +434,11 @@ function LibraryView:actionBar()
         row[#row + 1] = button
         self._action_primary[#self._action_primary + 1] = button
     end
-    -- right padding matches the TitleBar close button's Screen:scaleBySize(11)
+    -- right margin mirrors the bottom dock separator's own inset (side_m),
+    -- so the action module's right edge aligns with the separator's end
     return FrameContainer:new{
         bordersize = 0, padding = 0, margin = 0,
-        padding_right = Screen:scaleBySize(11),
+        padding_right = Screen:scaleBySize(28),
         row,
     }
 end
@@ -488,7 +502,11 @@ function LibraryView:content()
     if self.cover_mode and self.mode == "books" then
         local columns = math.max(1, math.floor(tonumber(self.cover_columns) or 3))
         local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
-        local cell_width = math.floor(self.content_width / columns)
+        -- the grid as a whole is inset on both sides by the dock separator's
+        -- own margin; per-book spacing/size logic below is unchanged
+        local side_m = self.cover_side_margin or Screen:scaleBySize(24)
+        local usable_w = math.max(1, self.content_width - 2 * side_m)
+        local cell_width = math.floor(usable_w / columns)
         local cell_height = math.floor(math.max(
             1,
             tonumber(self.cover_cell_height) or math.floor(self.screen_h * 0.28)
@@ -503,10 +521,14 @@ function LibraryView:content()
             if column == 1 then
                 grid_row = {}
                 self._focus_item_rows[#self._focus_item_rows + 1] = grid_row
-                table.insert(content, HorizontalGroup:new(grid_row))
+                table.insert(content, HorizontalGroup:new{
+                    HorizontalSpan:new{ width = side_m },
+                    HorizontalGroup:new(grid_row),
+                    HorizontalSpan:new{ width = side_m },
+                })
             end
             local width = column == columns
-                and self.content_width - cell_width * (columns - 1)
+                and usable_w - cell_width * (columns - 1)
                 or cell_width
             local height = row == rows and grid_height - cell_height * (rows - 1)
                 or cell_height
@@ -629,14 +651,18 @@ function LibraryView:init()
     self.outer_margin = 0
     self.content_width = self.screen_w
     self.list_width = self.screen_w - 3 * Screen:scaleBySize(6)
+    -- cover-grid side margin, aligned with the dock separator line's own
+    -- left/right inset (bottomDock side_m = scaleBySize(24))
+    self.cover_side_margin = Screen:scaleBySize(24)
     if Device:hasKeys() then self.key_events.Close = { { Device.input.group.Back } } end
 
     self.title_bar = TitleBar:new{
         width = self.screen_w,
-        title = self.title or tr("WeRead Bookshelf"),
-        title_face = Font:getFace("tfont", 28),
+        title = self.title or tr("WeRead"),
+        title_face = Font:getFace("smalltfont"), -- FM(书库) title parity: same face/size as FM TitleBar
+        title_top_padding = Screen:scaleBySize(6), -- same vertical padding as FM TitleBar → same title height
         align = "center",
-        with_bottom_line = true,
+        with_bottom_line = false, -- the bottom line below is drawn by title_sep
         right_icon_size_ratio = 0.75,
         -- personal fork: the X close button is hidden (cleaner top bar).
         -- Closing still works via the physical Back key (key_events.Close)
@@ -644,6 +670,20 @@ function LibraryView:init()
         show_parent = self,
     }
     local tool = self:toolRow()
+    -- title separator: mirrors the bottom dock divider (same thin light-grey
+    -- line inset by cover_side_margin on both sides), replacing the built-in
+    -- TitleBar bottom line
+    local title_sep = HorizontalGroup:new{
+        HorizontalSpan:new{ width = self.cover_side_margin },
+        LineWidget:new{
+            dimen = Geom:new{
+                w = math.max(1, self.screen_w - 2 * self.cover_side_margin),
+                h = Screen:scaleBySize(1),
+            },
+            background = Blitbuffer.gray(0.72),
+        },
+        HorizontalSpan:new{ width = self.cover_side_margin },
+    }
     self:preparePagination()
     local page_bar = self:pageBar()
     self.top_gap = top_gap
@@ -651,8 +691,8 @@ function LibraryView:init()
     local dock = self:bottomDock(bottom_gap)
     local dock_h = dock and bottom_gap or 0
     local scroll_h = math.max(1, self.screen_h - top_gap - dock_h
-        - self.title_bar:getHeight() - tool:getSize().h
-        - (page_bar and page_bar:getSize().h or 0))
+        - self.title_bar:getHeight() - title_sep:getSize().h
+        - tool:getSize().h - (page_bar and page_bar:getSize().h or 0))
     if self.cover_mode and self.mode == "books" then
         local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
         self.cover_content_height = scroll_h
@@ -695,7 +735,7 @@ function LibraryView:init()
                 bordersize = 0, padding = 0, margin = 0,
                 width = self.screen_w,
                 VerticalGroup:new{
-                    align = "left", self.title_bar, tool, scroll,
+                    align = "left", self.title_bar, title_sep, tool, scroll,
                     page_bar or VerticalSpan:new{ width = 0 },
                 },
             },
