@@ -1,6 +1,17 @@
 # Changelog · 个人 UI 定制版（fork）
 
-本文件记录相对上游 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的定制变更，均位于 `ui-tweak` 分支。上游自身的变更见仓库根 [CHANGELOG.md](CHANGELOG.md)；fork 用法与边界见 [README.fork.md](README.fork.md)。
+本文件记录相对上游 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的定制变更，均位于 `custom` 分支。上游自身的变更见仓库根 [CHANGELOG.md](CHANGELOG.md)；fork 用法与边界见 [README.fork.md](README.fork.md)。
+
+## [1.4.2-fork.4] - 2026-09-09
+
+### 变更
+
+- **顶部标题对齐本地书库** — 标题由「微信读书书架」改为「微信读书」；标题字体改为 FM「书库」同款（smalltfont 24）并采用与 FM TitleBar 相同的顶部内距，标题与 FM 同高（整页相应上提）。
+- **标题下分隔线统一** — 顶部标题下改用与底部 dock 分隔线同款的自绘分隔线（1px 浅灰，左右各 24px 内缩），替换原 TitleBar 内置底线。
+- **封面网格左右留白** — 封面网格整体左右各收进 24px，与 dock 分隔线 / 标题分隔线的左右内缩对齐。
+- **「书籍 / 公众号」tab 对齐与外观** — tab 组左边距对齐 dock 分隔线（24px）；激活指示横线改为 1px，与 dock 分隔线同粗；点按高亮改为直角矩形并缩小（按钮不再带背景——KOReader 对带背景的按钮会强制圆角高亮），与标题分隔线、下方指示线之间各留空隙。
+- **右侧操作顺序与留白** — 操作顺序由 排序 / 筛选 / 搜索 / 刷新 调整为 刷新 / 搜索 / 排序 / 筛选；模块右边距 28px，与左侧 tab 留白视觉对称。
+- **封面下书名对齐本地书库** — 封面下书名改用与 FM 列表行文字相同的字体规格（smallinfofont 19、常规字重）。
 
 ## [1.4.2-fork.3] - 2026-09-09
 
@@ -14,10 +25,6 @@
 ### 变更
 
 - 书架页 dock / 让位 / 手势 / 电源菜单的实现迁移到 FullscreenHost（架构层提取，行为不变）；dock 图标映射表从写死改为调用 SimpleUI 注册表。
-
-### 移除
-
-- 无（本 fork 均为增量定制）。
 
 ## [1.4.2-fork.2] - 2026-09-08
 

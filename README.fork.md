@@ -1,4 +1,4 @@
-# weread.koplugin · 个人 UI 定制版（fork 1.4.2-fork.3）
+# weread.koplugin · 个人 UI 定制版（fork 1.4.2-fork.4）
 
 基于 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的 UI 定制分支，**与 SimpleUI 深度整合**：让 weread 书架看起来、用起来和 SimpleUI 的界面是一套的。仅供个人学习使用，许可证 AGPL-3.0（来源与免责声明见上游 [README.md](README.md) / [NOTICE](NOTICE)）。
 
@@ -15,6 +15,7 @@
 - **前光快捷手势**：左缘上下滑 / 双指上下滑直接调光，原生通知反馈。
 - **阅读统计页同样接入宿主外壳**：从 dock 打开统计 = 统计页自带状态栏与底部导航栏（dock 高亮统计项），与书架同一套体验。
 - **dock 图标 / 项目灵活跟随 SimpleUI**：dock 图标与名称直接读 SimpleUI 的注册表——在 SimpleUI 里换图标、加自定义快捷项、改名，书架与统计 dock 自动跟随。
+- **书架页视觉对齐本地书库（FM）**：顶部标题「微信读书」及其下分隔线、封面网格的左右留白均与 FM「书库」同参对齐；封面下书名与本地书库列表行同字体规格；「书籍 / 公众号」tab 高亮为直角小矩形、激活指示线与 dock 分隔线同粗。
 
 ## 安装
 
