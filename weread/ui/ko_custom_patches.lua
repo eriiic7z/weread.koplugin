@@ -332,6 +332,7 @@ local function installMosaicMarginHook()
     if mosaic_hook_installed then return end
     mosaic_hook_installed = true
     local orig_recalc = MM._recalculateDimen
+    local mosaic_top_extra = Screen:scaleBySize(14)
     MM._recalculateDimen = function(self, ...)
         orig_recalc(self, ...)
         local m = Screen:scaleBySize(24)
@@ -340,9 +341,12 @@ local function installMosaicMarginHook()
         if not (rows and cols and rows > 0 and cols > 0 and id and id.w and id.h) then
             return
         end
+        -- keep the same bottom edge while the grid is shifted down by
+        -- mosaic_top_extra (see the item_group top spacer below)
+        local h_avail = math.max(1, id.h - mosaic_top_extra)
         self.item_margin = m
         self.item_height = math.max(1, math.floor(
-            (id.h - (self.others_height or 0) - (1 + rows) * m) / rows))
+            (h_avail - (self.others_height or 0) - (1 + rows) * m) / rows))
         self.item_width = math.max(1, math.floor(
             (id.w - (1 + cols) * m) / cols))
         self.item_dimen = Geom:new{
@@ -351,10 +355,33 @@ local function installMosaicMarginHook()
             h = self.item_height,
         }
     end
+
+    -- shift the whole grid down: enlarge the item_group's leading spacer
+    local orig_build = MM._updateItemsBuildUI
+    if type(orig_build) == "function" then
+        MM._updateItemsBuildUI = function(self, ...)
+            local r = orig_build(self, ...)
+            pcall(function()
+                local g = self.item_group
+                if g and g[1] and type(g[1].width) == "number" then
+                    g[1].width = g[1].width + mosaic_top_extra
+                end
+            end)
+            return r
+        end
+    end
     local ok_fc, FC = pcall(require, "ui/widget/filechooser")
-    if ok_fc and FC and FC.nb_cols_portrait
-            and FC._recalculateDimen == orig_recalc then
-        FC._recalculateDimen = MM._recalculateDimen
+    if ok_fc and FC then
+        if FC.nb_cols_portrait and FC._recalculateDimen == orig_recalc then
+            FC._recalculateDimen = MM._recalculateDimen
+        end
+        -- coverbrowser copies the builder onto FileChooser when mosaic is
+        -- enabled; make sure that copy is our wrapped version too
+        if type(orig_build) == "function"
+                and FC._updateItemsBuildUI == orig_build
+                and MM._updateItemsBuildUI then
+            FC._updateItemsBuildUI = MM._updateItemsBuildUI
+        end
     end
     logger.info("wrFmPatch: mosaic margin hook installed")
 end
@@ -362,8 +389,13 @@ end
 --- Call synchronously from WeReadPlugin:init(): light FM title hook only, so
 --- it catches the FM TitleBar construction (heavy coverbrowser work is
 --- deferred to keep first paint snappy / crash-free).
+-- forward declarations (defined further below, referenced inside apply_fm)
+local layoutFMToolbar
+local installFMToolbarPatch
+
 local function apply_fm()
     installTitleFaceHook()
+    installFMToolbarPatch()
     local ok_ui, UIManager = pcall(require, "ui/uimanager")
     if ok_ui and UIManager and UIManager.scheduleIn then
         UIManager:scheduleIn(1.5, function()
@@ -371,12 +403,227 @@ local function apply_fm()
             pcall(installMosaicMarginHook)
             pcall(installPagerSizePatch)
             pcall(installPagerTextPatch)
+            pcall(function()
+                local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+                local fm = ok_f and FM.instance
+                if fm then layoutFMToolbar(fm) end
+            end)
         end)
     else
         pcall(installMosaicMarginHook)
     end
 end
 
+
+-- ---------------------------------------------------------------------------
+-- FM (本地书库) header toolbar: move SimpleUI's titlebar buttons (返回 / 搜索 |
+-- 浏览 / 菜单) out of the title row into a compact row below the title
+-- separator — 18px glyphs, 16px spacing, 24px side insets — and reserve that
+-- row's height in the TitleBar so the content stays uncovered.
+-- ---------------------------------------------------------------------------
+local fm_toolbar_installed = false
+
+local function shrinkFMButton(btn, box, glyph)
+    pcall(function()
+        btn.width  = box
+        btn.height = box
+        btn.padding_left, btn.padding_right = 0, 0
+        btn.padding_top, btn.padding_bottom = 0, 0
+        local Font = require("ui/font")
+        local ok_s, S = pcall(require, "features/sui_style")
+        local face = (ok_s and S and S.FACE_ICONS) or "cfont"
+        local img = btn.image
+        if img then
+            img.width, img.height = glyph, glyph
+            if img.is_sui_wrapper then
+                img.face = Font:getFace(face, math.floor(glyph * 0.65))
+            else
+                pcall(img.free, img)
+                pcall(img.init, img)
+            end
+        end
+        local lbl = btn.label_widget
+        if lbl then
+            lbl.width, lbl.height = glyph, glyph
+            if lbl.is_sui_wrapper then
+                lbl.face = Font:getFace(face, math.floor(glyph * 0.65))
+            end
+        end
+        if type(btn.update) == "function" then pcall(btn.update, btn) end
+    end)
+end
+
+--- Enforce our own x/y at paint time. SimpleUI re-positions the left-side
+--- buttons (back/search) whenever page/folder state changes, so storing an
+--- overlap_offset is not enough — the paint override wins regardless.
+local function forcePaintAt(btn, bar)
+    if not (btn and btn.paintTo) or btn._wr_paint_at then return end
+    btn._wr_paint_at = true
+    local orig = btn.paintTo
+    btn.paintTo = function(self, bb, x, y)
+        local off = self.overlap_offset or { 0, 0 }
+        -- prefer the TitleBar's recorded absolute origin (works for widgets
+        -- inside groups too, e.g. the subtitle, which has no offset)
+        local base_x = (bar and bar._wr_abs_x) or (x - (off[1] or 0))
+        local base_y = (bar and bar._wr_abs_y) or (y - (off[2] or 0))
+        local wx, wy = self._wr_x, self._wr_y
+        if self._wr_center then
+            -- live-measure at paint time (layout may not be ready earlier)
+            local w = 0
+            pcall(function() w = self:getSize().w or 0 end)
+            wx = math.max(0, math.floor((Screen:getWidth() - w) / 2))
+        end
+        return orig(self, bb, base_x + (wx or 0), base_y + (wy or 0))
+    end
+end
+
+--- Record the TitleBar's absolute paint origin once (used by forcePaintAt).
+local function ensureBarOrigin(tb)
+    if not (tb and tb.paintTo) or tb._wr_origin_hooked then return end
+    tb._wr_origin_hooked = true
+    local orig = tb.paintTo
+    tb.paintTo = function(self, bb, x, y)
+        self._wr_abs_x, self._wr_abs_y = x, y
+        return orig(self, bb, x, y)
+    end
+end
+
+local fm_toolbar_laying_out = false
+
+layoutFMToolbar = function(fm_self)
+    local tb = fm_self and fm_self.title_bar
+    if not tb or fm_toolbar_laying_out then return end
+    fm_toolbar_laying_out = true
+    local sw    = Screen:getWidth()
+    local glyph = Screen:scaleBySize(26)
+    local box   = glyph + Screen:scaleBySize(8) -- invisible tap padding
+    local gap   = Screen:scaleBySize(16)
+    local side  = Screen:scaleBySize(24)
+
+    local ok = pcall(function()
+        ensureBarOrigin(tb)
+        -- title row height -> separator y (same formula as the separator patch)
+        local title_h = 0
+        pcall(function()
+            if tb.title_widget and tb.title_widget.getSize then
+                title_h = tb.title_widget:getSize().h or 0
+            end
+        end)
+        local sep_y = math.floor(title_h) + Screen:scaleBySize(6.5)
+        local y     = sep_y + 1 + Screen:scaleBySize(9)
+
+        -- the four widgets (SimpleUI's injected three + the native right button)
+        local widgets = {}
+        for _, w in ipairs({
+            fm_self._titlebar_up_btn,
+            fm_self._titlebar_search_btn,
+            fm_self._titlebar_browse_btn,
+            tb.right_button,
+        }) do
+            if w and w.overlap_offset then
+                local ox = w.overlap_offset[1] or 0
+                if ox < sw then -- skip ones SimpleUI hid by pushing off-screen
+                    widgets[#widgets + 1] = w
+                end
+            end
+        end
+        if #widgets == 0 then return end
+
+        local lefts, rights = {}, {}
+        for _, w in ipairs(widgets) do
+            if (w.overlap_offset[1] or 0) < sw / 2 then
+                lefts[#lefts + 1] = w
+            else
+                rights[#rights + 1] = w
+            end
+        end
+        local function by_x(a, b)
+            return (a.overlap_offset[1] or 0) < (b.overlap_offset[1] or 0)
+        end
+        table.sort(lefts, by_x)
+        table.sort(rights, by_x)
+
+        for i, w in ipairs(lefts) do
+            shrinkFMButton(w, box, glyph)
+            w.overlap_align = nil
+            w._wr_x = side + (i - 1) * (box + gap)
+            w._wr_y = y
+            forcePaintAt(w, tb)
+        end
+        local total = #rights * box + math.max(0, #rights - 1) * gap
+        local rx0   = math.max(side, sw - side - total)
+        for i, w in ipairs(rights) do
+            shrinkFMButton(w, box, glyph)
+            w.overlap_align = nil
+            w._wr_x = rx0 + (i - 1) * (box + gap)
+            w._wr_y = y
+            forcePaintAt(w, tb)
+        end
+
+        -- subtitle (folder path) shares the toolbar row, vertically centred
+        local sub = tb.subtitle_widget
+        if sub then
+            local sub_h = 0
+            pcall(function() sub_h = sub:getSize().h or 0 end)
+            local left_w  = #lefts * box + math.max(0, #lefts - 1) * gap
+            local right_w = #rights * box + math.max(0, #rights - 1) * gap
+            local mid_w = math.max(1, sw - side * 2 - left_w - right_w
+                - Screen:scaleBySize(16))
+            pcall(function()
+                if sub.max_width then sub.max_width = mid_w
+                elseif sub.width then sub.width = mid_w end
+            end)
+            local sub_w = mid_w
+            pcall(function()
+                if sub.alignment then sub.alignment = "center" end
+                sub_w = sub:getSize().w or mid_w
+            end)
+            sub._wr_x = math.max(side, math.floor((sw - sub_w) / 2))
+            sub._wr_center = true
+            sub._wr_y = y + math.max(0, math.floor((box - sub_h) / 2))
+                - Screen:scaleBySize(4)
+            forcePaintAt(sub, tb)
+        end
+
+        -- reserve the toolbar row inside the TitleBar so content moves down
+        local target_h = y + box + Screen:scaleBySize(3)
+        local cur_h    = tb.titlebar_height or (tb.dimen and tb.dimen.h) or 0
+        if target_h > cur_h then
+            tb.titlebar_height = target_h
+            if tb.dimen then
+                tb.dimen = Geom:new{ x = 0, y = 0, w = tb.dimen.w, h = target_h }
+            end
+        end
+        pcall(function()
+            if fm_self._recalculateDimen then fm_self:_recalculateDimen() end
+        end)
+        pcall(function()
+            local ok_ui, UIManager = pcall(require, "ui/uimanager")
+            if ok_ui and UIManager then UIManager:setDirty(fm_self, "ui") end
+        end)
+        logger.info("wrFmToolbar: laid out (" .. #lefts .. " left / " .. #rights
+            .. " right), glyph=" .. glyph .. " y=" .. y)
+    end)
+    if not ok then logger.info("wrFmToolbar: layout failed") end
+    fm_toolbar_laying_out = false
+end
+
+installFMToolbarPatch = function()
+    if fm_toolbar_installed then return end
+    local ok_t, ST = pcall(require, "screens/sui_titlebar")
+    if not ok_t or not ST or type(ST.apply) ~= "function" then
+        logger.info("wrFmToolbar: sui_titlebar unavailable, toolbar patch skipped")
+        return
+    end
+    fm_toolbar_installed = true
+    local orig_apply = ST.apply
+    ST.apply = function(fm_self, ...)
+        local res = orig_apply(fm_self, ...)
+        pcall(layoutFMToolbar, fm_self)
+        return res
+    end
+    logger.info("wrFmToolbar: hook installed")
+end
 
 -- ---------------------------------------------------------------------------
 -- Entry points
