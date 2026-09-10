@@ -1,23 +1,158 @@
--- weread/ui/fm_visual_patch.lua
+-- weread/ui/ko_custom_patches.lua
 --
--- Local-bookshelf (SimpleUI FileManager / folder-covers mosaic) runtime
--- patches, applied by the weread plugin:
---   1) FM title bar face → smalltfont 26 + vertical alignment (matches the
---      weread shelf title). Installed EARLY at plugin init because KOReader
---      builds the FM TitleBar before plugins finish loading.
---   2) folder-covers mosaic wall margins → 24px (heavier coverbrowser
---      module, deferred until a moment after boot).
+-- Fork-owned runtime patches for components we do NOT own:
+--   1) Kindle-style menu veil (FileManagerMenu / ReaderMenu dim backdrop)
+--   2) Local-bookshelf (SimpleUI FileManager / folder-covers mosaic) visuals:
+--      FM title face + alignment, mosaic margins, pager size/spacing/format
 --
--- No KOReader / coverbrowser files are touched; idempotent.
+-- No KOReader / SimpleUI / coverbrowser file is modified; both patches are
+-- idempotent and installed by the weread plugin at init. (Formerly the two
+-- files menu_scrim_patch.lua and fm_visual_patch.lua.)
 
+local Blitbuffer = require("ffi/blitbuffer")
+local Device = require("device")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local LineWidget = require("ui/widget/linewidget")
-local Blitbuffer = require("ffi/blitbuffer")
-local Screen = require("device").screen
+local UIManager = require("ui/uimanager")
+local Widget = require("ui/widget/widget")
 local logger = require("logger")
+local Screen = Device.screen
 
 local M = {}
+
+-- ---------------------------------------------------------------------------
+-- 1) Kindle-style menu veil
+-- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Kindle-style dim backdrop (formerly weread/ui/dim_scrim.lua).
+--
+-- Kindle dims everything outside the open menu; KOReader has no such
+-- mechanism, so this is a minimal full-screen overlay. e-ink needs an
+-- explicit full-screen refresh to actually show a large new layer (the
+-- caller shows it with "full"), and the backdrop is drawn with the
+-- blitbuffer's true alpha blending (darkenRect) where available, which
+-- gives the uniform grey veil Kindle shows. Fallback (no darkenRect):
+-- spaced black cells.
+-- ---------------------------------------------------------------------------
+local DimScrim = Widget:extend{
+    name = "wr_dim_scrim",
+}
+
+function DimScrim:init()
+    self.dimen = Geom:new{
+        w = Screen:getWidth(),
+        h = Screen:getHeight(),
+    }
+end
+
+-- Kindle backdrop parameters (fixed, matching the Kindle OS dim veil as
+-- observed on-device): it is a CHECKERBOARD -- black cell and transparent
+-- cell alternating 1:1, so the gap between two black cells equals one cell.
+-- Cell size 4px (between the too-large 5px and the too-small 3px trials,
+-- per device feedback), black at 80% opacity.
+local CELL = 4
+local OPACITY = 0.8
+
+function DimScrim:paintTo(bb, x, y)
+    local w, h = self.dimen.w, self.dimen.h
+    if bb.darkenRect then
+        local row = 0
+        local gy = 0
+        while gy <= h - CELL do
+            local col = 0
+            local gx = 0
+            while gx <= w - CELL do
+                if (row + col) % 2 == 0 then
+                    bb:darkenRect(x + gx, y + gy, CELL, CELL, OPACITY)
+                end
+                gx = gx + CELL
+                col = col + 1
+            end
+            gy = gy + CELL
+            row = row + 1
+        end
+    else
+        -- no alpha support on this buffer type: solid checkerboard fallback
+        local row = 0
+        local gy = 0
+        while gy <= h - CELL do
+            local col = 0
+            local gx = 0
+            while gx <= w - CELL do
+                if (row + col) % 2 == 0 then
+                    bb:paintRect(x + gx, y + gy, CELL, CELL, Blitbuffer.COLOR_BLACK)
+                end
+                gx = gx + CELL
+                col = col + 1
+            end
+            gy = gy + CELL
+            row = row + 1
+        end
+    end
+end
+
+local applied = false
+
+local function patch_menu_class(cls, show_name, close_name, scrim_key)
+    local orig_show = cls[show_name]
+    local orig_close = cls[close_name]
+    if type(orig_show) ~= "function" or type(orig_close) ~= "function" then
+        logger.info("wrScrim: skip (missing methods) " .. show_name)
+        return false
+    end
+    cls[show_name] = function(self, tab_index, do_not_show)
+        if not do_not_show then
+            -- insert the veil below the menu; a non-flashing full-screen
+            -- refresh surfaces the layer (flashui tested as alternative)
+            local layer = DimScrim:new{}
+            self[scrim_key] = layer
+            UIManager:show(layer, "full")
+            logger.info("wrScrim: veil shown under " .. show_name)
+        end
+        return orig_show(self, tab_index, do_not_show)
+    end
+    cls[close_name] = function(self, ...)
+        local ok_l, logger = pcall(require, "logger")
+        if ok_l then logger.info("wrScrim: close-hook enter scrim=" .. tostring(self[scrim_key] ~= nil)) end
+        if self[scrim_key] then
+            UIManager:close(self[scrim_key])
+            self[scrim_key] = nil
+            -- non-flashing full refresh: clears the veil everywhere on the
+            -- e-ink display (closing widgets only refresh their own region)
+            UIManager:setDirty(nil, "partial")
+            if ok_l then logger.info("wrScrim: close-hook scrim dropped") end
+        end
+        if ok_l then logger.info("wrScrim: close-hook calling orig") end
+        local r = orig_close(self, ...)
+        if ok_l then logger.info("wrScrim: close-hook orig returned") end
+        return r
+    end
+    logger.info("wrScrim: patched " .. show_name)
+    return true
+end
+
+local function ensure()
+    if applied then
+        return true
+    end
+    local ok1, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
+    if ok1 then
+        patch_menu_class(FileManagerMenu, "onShowMenu", "onCloseFileManagerMenu", "_wr_scrim")
+    else
+        logger.info("wrScrim: fm require failed")
+    end
+    local ok2, ReaderMenu = pcall(require, "apps/reader/modules/readermenu")
+    if ok2 then
+        patch_menu_class(ReaderMenu, "onShowMenu", "onCloseReaderMenu", "_wr_scrim")
+    else
+        logger.info("wrScrim: reader menu require failed")
+    end
+    applied = true
+    logger.info("wrScrim: ensure done")
+    return true
+end
+
 
 local title_hook_installed = false
 
@@ -227,7 +362,7 @@ end
 --- Call synchronously from WeReadPlugin:init(): light FM title hook only, so
 --- it catches the FM TitleBar construction (heavy coverbrowser work is
 --- deferred to keep first paint snappy / crash-free).
-function M.apply()
+local function apply_fm()
     installTitleFaceHook()
     local ok_ui, UIManager = pcall(require, "ui/uimanager")
     if ok_ui and UIManager and UIManager.scheduleIn then
@@ -240,6 +375,17 @@ function M.apply()
     else
         pcall(installMosaicMarginHook)
     end
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Entry points
+-- ---------------------------------------------------------------------------
+M.ensure = ensure          -- veil only (safe to call repeatedly)
+M.apply = apply_fm         -- FM visuals only
+function M.install()       -- both, used by WeReadPlugin:init()
+    ensure()
+    apply_fm()
 end
 
 return M
