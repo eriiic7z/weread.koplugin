@@ -24,6 +24,7 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Widget = require("ui/widget/widget")
 local Screen = Device.screen
+local TitleMetrics = require("weread.ui.header_metrics")
 local FullscreenHost = require("weread.ui.fullscreen_host")
 local FocusNav = require("weread.ui.focus_nav")
 local I18n = require("weread.lib.i18n")
@@ -789,18 +790,18 @@ function LibraryView:init()
     self.content_width = self.screen_w
     self.list_width = self.screen_w - 3 * Screen:scaleBySize(6)
     -- cover-grid side margin, aligned with the dock separator line's own
-    -- left/right inset (bottomDock side_m = scaleBySize(24))
-    self.cover_side_margin = Screen:scaleBySize(24)
+    -- left/right inset (== LINE_INSET in ui/header_metrics.lua)
+    self.cover_side_margin = Screen:scaleBySize(TitleMetrics.LINE_INSET)
     if Device:hasKeys() then self.key_events.Close = { { Device.input.group.Back } } end
 
     self.title_bar = TitleBar:new{
         width = self.screen_w,
         title = self.title or tr("WeRead"),
-        title_face = Font:getFace("smalltfont", 26), -- shelf title: smalltfont, bumped +2 over FM's 24
-        title_top_padding = Screen:scaleBySize(6), -- same vertical padding as FM TitleBar → same title height
+        title_face = Font:getFace(TitleMetrics.FACE, TitleMetrics.FACE_SIZE),
+        title_top_padding = Screen:scaleBySize(TitleMetrics.TOP_PADDING),
         align = "center",
         with_bottom_line = false, -- the bottom line below is drawn by title_sep
-        bottom_v_padding = Screen:scaleBySize(6.5), -- fine-tune: line sits ~3.5 higher under the title
+        bottom_v_padding = Screen:scaleBySize(TitleMetrics.LINE_GAP),
         right_icon_size_ratio = 0.75,
         -- personal fork: the X close button is hidden (cleaner top bar).
         -- Closing still works via the physical Back key (key_events.Close)
@@ -816,9 +817,9 @@ function LibraryView:init()
         LineWidget:new{
             dimen = Geom:new{
                 w = math.max(1, self.screen_w - 2 * self.cover_side_margin),
-                h = Screen:scaleBySize(1),
+                h = Screen:scaleBySize(TitleMetrics.LINE_H),
             },
-            background = Blitbuffer.gray(0.72),
+            background = Blitbuffer.gray(TitleMetrics.LINE_GRAY),
         },
         HorizontalSpan:new{ width = self.cover_side_margin },
     }

@@ -43,6 +43,7 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
+local TitleMetrics = require("weread.ui.header_metrics")
 local FocusNav = require("weread.ui.focus_nav")
 local FullscreenHost = require("weread.ui.fullscreen_host")
 local I18n = require("weread.lib.i18n")
@@ -590,11 +591,11 @@ function ReadStatsView:init()
         width = self.screen_w,
         title = title,
         title_multilines = true,
-        title_face = Font:getFace("smalltfont", 26), -- same face/size as the bookshelf title
-        title_top_padding = Screen:scaleBySize(6),    -- same vertical padding too
+        title_face = Font:getFace(TitleMetrics.FACE, TitleMetrics.FACE_SIZE),
+        title_top_padding = Screen:scaleBySize(TitleMetrics.TOP_PADDING),
         align = "center",
         with_bottom_line = false, -- no bottom line / separator below the title
-        bottom_v_padding = Screen:scaleBySize(6.5), -- same as the shelf title bar → tab top sits at the shelf separator's line
+        bottom_v_padding = Screen:scaleBySize(TitleMetrics.LINE_GAP),
         -- X close button removed (bookshelf style): Back key / dock nav close
         show_parent = self,
     }

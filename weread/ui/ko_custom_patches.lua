@@ -18,6 +18,7 @@ local UIManager = require("ui/uimanager")
 local Widget = require("ui/widget/widget")
 local logger = require("logger")
 local Screen = Device.screen
+local TitleMetrics = require("weread.ui.header_metrics")
 
 local M = {}
 
@@ -166,22 +167,42 @@ local function installTitleFaceHook()
         local is_fm = self.left_icon == "home" and not self._wr_fm_title_done
         if is_fm then
             -- FileManager title: weread shelf title face
-            self.title_face = Font:getFace("smalltfont", 26)
+            self.title_face = Font:getFace(TitleMetrics.FACE, TitleMetrics.FACE_SIZE)
             -- Measured (paintY logs): FM text top 73 vs weread 66 → 7px low.
             -- title_group overlap offsets are ignored by the layout, so the
             -- real fix is a content-level lift (liftFMContent, scheduled after
             -- boot); pad stays 0 so the title sits at the bar top.
             if self.title_top_padding then
-                self.title_top_padding = Screen:scaleBySize(0)
+                self.title_top_padding = Screen:scaleBySize(TitleMetrics.FM_TOP_PADDING)
             end
         end
         local res = orig_init(self, ...)
         if is_fm then
+            -- Pin the title's x ourselves: KOReader centres it inside a parent
+            -- whose width can be odd on some relayouts, making
+            -- (parent_w - text_w)/2 land on .5 and alternating between 488/489
+            -- when returning to the root folder (measured: see git log).
+            -- Only the x we pass is replaced — the title is still drawn by
+            -- KOReader's own TextWidget (same mechanism as the toolbar icons).
+            if self.title_widget and self.title_widget.paintTo
+                    and not self._wr_titlex_hooked then
+                self._wr_titlex_hooked = true
+                local tw = self.title_widget
+                local orig_tw_paint = tw.paintTo
+                tw.paintTo = function(tw_self, bb, x, y)
+                    local sz = tw_self:getSize()
+                    local bar_w = self.dimen and self.dimen.w
+                    if sz and bar_w and sz.w then
+                        x = math.floor((bar_w - sz.w) / 2)
+                    end
+                    return orig_tw_paint(tw_self, bb, x, y)
+                end
+            end
             -- separator directly under the 书库 title row (weread position),
             -- not at the whole header bottom (which includes the path subtitle)
             if not self._wr_fm_sep then
                 local w = Screen:getWidth()
-                local inset = Screen:scaleBySize(24)
+                local inset = Screen:scaleBySize(TitleMetrics.LINE_INSET)
                 local title_h = 0
                 if self.title_widget and self.title_widget.getSize then
                     local ok_s, sz = pcall(function()
@@ -190,13 +211,13 @@ local function installTitleFaceHook()
                     if ok_s and sz then title_h = sz.h or 0 end
                 end
                 local y = math.max(1, math.floor(title_h)
-                    + Screen:scaleBySize(6.5))
+                    + Screen:scaleBySize(TitleMetrics.LINE_GAP))
                 local sep = LineWidget:new{
                     dimen = Geom:new{
                         w = math.max(1, w - 2 * inset),
-                        h = Screen:scaleBySize(1),
+                        h = Screen:scaleBySize(TitleMetrics.LINE_H),
                     },
-                    background = Blitbuffer.gray(0.72),
+                    background = Blitbuffer.gray(TitleMetrics.LINE_GRAY),
                 }
                 sep.overlap_offset = { inset, y }
                 table.insert(self, sep)
@@ -437,10 +458,10 @@ local fm_toolbar_installed = false
 -- the whole block aligned automatically); set one to a bar-relative number to
 -- pin just that element.
 local FM_HDR = {
-    LINE_GAP   = 6.5,  -- separator offset below the title row
+    LINE_GAP   = TitleMetrics.LINE_GAP, -- separator offset below the title row
     ICON_GAP   = 9,    -- toolbar row offset below the separator
     SUB_SHIFT  = -4,   -- subtitle fine-tune around its row centring
-    SIDE       = 24,   -- left/right inset (aligned with the separator ends)
+    SIDE       = TitleMetrics.LINE_INSET, -- left/right inset (== separator ends)
     ICON_PX    = 26,   -- icon glyph size
     ICON_PAD   = 8,    -- invisible tap padding added to the glyph box
     ICON_GAP_X = 16,   -- spacing between icons
