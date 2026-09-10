@@ -71,8 +71,9 @@ function Host:dockConfig(id)
     return store:readSetting("simpleui_qa_" .. id)
 end
 
---- Reserved top (status bar) / bottom (nav bar) heights from SimpleUI's
---- settings, in pixels. 0 when SimpleUI bands are off or unreachable.
+--- Reserved top (status bar) / bottom (nav bar) heights, in pixels.
+--- Prefer SimpleUI's own API (single source of truth); fall back to the
+--- locally mirrored formulas if the modules are unreachable/older.
 function Host.reservedBands()
     local ok_ds, DataStorage = pcall(require, "datastorage")
     if not ok_ds then return 0, 0 end
@@ -87,20 +88,42 @@ function Host.reservedBands()
         if not v then return def end
         return math.max(lo, math.min(hi, v))
     end
+    local top_enabled = store and store:readSetting("simpleui_topbar_enabled", true) ~= false
+    local bar_enabled = store and store:readSetting("simpleui_bar_enabled", true) ~= false
+
     local top = 0
-    if store and store:readSetting("simpleui_topbar_enabled", true) ~= false then
-        local s = sui_pct("simpleui_topbar_size_pct", 100, 50, 150) / 100
-        top = math.floor(22 * s)
-            + math.floor(Screen:scaleBySize(20) * s)
-            + math.floor(Screen:scaleBySize(8) * s)
+    if top_enabled then
+        -- SimpleUI's own top-bar height API TOTAL_TOP_H
+        -- SimpleUI's own top-bar height API TOTAL_TOP_H, lazy; module may be
+        -- absent/older)
+        local ok_tb, Topbar = pcall(require, "screens/sui_topbar")
+        if ok_tb and Topbar and type(Topbar.TOTAL_TOP_H) == "function" then
+            local ok_h, h = pcall(Topbar.TOTAL_TOP_H)
+            if ok_h and type(h) == "number" and h > 0 then top = h end
+        end
+        if top == 0 then -- fallback: locally mirrored formula
+            local s = sui_pct("simpleui_topbar_size_pct", 100, 50, 150) / 100
+            top = math.floor(22 * s)
+                + math.floor(Screen:scaleBySize(20) * s)
+                + math.floor(Screen:scaleBySize(8) * s)
+        end
     end
     local bar = 0
-    if store and store:readSetting("simpleui_bar_enabled", true) ~= false then
-        local s = sui_pct("simpleui_bar_size_pct", 100, 50, 150) / 100
-        local b = sui_pct("simpleui_bar_bottom_margin_pct", 100, 0, 300) / 100
-        bar = math.floor(Screen:scaleBySize(96) * s)
-            + Screen:scaleBySize(2)
-            + math.floor(Screen:scaleBySize(12) * b)
+    if bar_enabled then
+        -- SimpleUI's own nav-bar height API TOTAL_H
+        -- SimpleUI's own nav-bar height API TOTAL_H, lazy
+        local ok_bb, Bottombar = pcall(require, "screens/sui_bottombar")
+        if ok_bb and Bottombar and type(Bottombar.TOTAL_H) == "function" then
+            local ok_h, h = pcall(Bottombar.TOTAL_H)
+            if ok_h and type(h) == "number" and h > 0 then bar = h end
+        end
+        if bar == 0 then -- fallback: locally mirrored formula
+            local s = sui_pct("simpleui_bar_size_pct", 100, 50, 150) / 100
+            local b = sui_pct("simpleui_bar_bottom_margin_pct", 100, 0, 300) / 100
+            bar = math.floor(Screen:scaleBySize(96) * s)
+                + Screen:scaleBySize(2)
+                + math.floor(Screen:scaleBySize(12) * b)
+        end
     end
     return top, bar
 end
@@ -328,13 +351,14 @@ function Host:showPowerDialog()
     if self._host_power_dialog then return end -- ignore double taps
     local ButtonDialog = require("ui/widget/buttondialog")
     local Event = require("ui/event")
+    local L = self._host and self._host.labels or {}
     local dialog_w = math.floor(Screen:getWidth() * 0.42)
     local function _clear()
         self._host_power_dialog = nil
     end
     local buttons = {}
     if Device:canRestart() then
-        buttons[#buttons + 1] = {{ text = "重启", callback = function()
+        buttons[#buttons + 1] = {{ text = L.restart or "重启", callback = function()
             local d = self._host_power_dialog
             self._host_power_dialog = nil
             UIManager:close(d)
@@ -342,7 +366,7 @@ function Host:showPowerDialog()
         end }}
     end
     if Device:canReboot() then
-        buttons[#buttons + 1] = {{ text = "重新引导", callback = function()
+        buttons[#buttons + 1] = {{ text = L.reboot or "重新引导", callback = function()
             local d = self._host_power_dialog
             self._host_power_dialog = nil
             UIManager:close(d)
@@ -350,7 +374,7 @@ function Host:showPowerDialog()
         end }}
     end
     if Device:canSuspend() then
-        buttons[#buttons + 1] = {{ text = "休眠", callback = function()
+        buttons[#buttons + 1] = {{ text = L.suspend or "休眠", callback = function()
             local d = self._host_power_dialog
             self._host_power_dialog = nil
             UIManager:close(d)
@@ -358,7 +382,7 @@ function Host:showPowerDialog()
             UIManager:suspend()
         end }}
     end
-    buttons[#buttons + 1] = {{ text = "退出", callback = function()
+    buttons[#buttons + 1] = {{ text = L.exit or "退出", callback = function()
         local d = self._host_power_dialog
         self._host_power_dialog = nil
         UIManager:close(d)
@@ -403,9 +427,21 @@ function Host:onFrontlightSwipe(ges)
     end
     local ok_n, Notification = pcall(require, "ui/widget/notification")
     if ok_n and Notification then
-        local text = new_intensity <= 0
-            and "前光已关闭"
-            or ("前光亮度已设为 " .. tostring(powerd:frontlightIntensity()) .. "。")
+        local L = self._host and self._host.labels or {}
+        local text
+        if new_intensity <= 0 then
+            text = L.frontlight_off or "前光已关闭"
+        else
+            local v = tostring(powerd:frontlightIntensity())
+            local t = L.frontlight_set
+            if type(t) == "function" then
+                text = t(v)
+            elseif type(t) == "string" then
+                text = (t:gsub("%%1", v))
+            else
+                text = "前光亮度已设为 " .. v .. "。"
+            end
+        end
         Notification:notify(text, Notification.SOURCE_ALWAYS_SHOW)
     end
     return true
@@ -484,6 +520,11 @@ function Host:onExit()
     return true
 end
 
+--- Localisable strings (optional). opts.labels = {
+---   restart / reboot / suspend / exit,           -- power dialog button texts
+---   frontlight_off,                              -- frontlight-off notice
+---   frontlight_set,                              -- string with %1, or a function(value)
+--- }
 function Host.install(view, opts)
     if view._host then return end
     view._host = opts or {}
