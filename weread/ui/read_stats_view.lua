@@ -19,7 +19,7 @@
 --     ├─ Trend card (bar chart with a value axis)
 --     ├─ Ranking card (most-read books)
 --     └─ Preference card (categories / time / authors / publishers)
---   [Nav row: ‹ previous | next ›]   (hidden for "overall")
+--   [Nav row: previous | next]   (hidden for "overall")
 
 local Blitbuffer = require("ffi/blitbuffer")
 local BottomContainer = require("ui/widget/container/bottomcontainer")
@@ -510,9 +510,9 @@ function ReadStatsView:buildNavRow()
             show_parent = self, enabled = enabled, callback = cb,
         }
     end
-    local prev_button = mk(tr("‹ Previous"), d.allow_prev == true,
+    local prev_button = mk("上一周期", d.allow_prev == true,
         function() self:onPrevPeriod() end)
-    local next_button = mk(tr("Next ›"), d.allow_next == true,
+    local next_button = mk("下一周期", d.allow_next == true,
         function() self:onNextPeriod() end)
     self._nav_buttons = { prev_button, next_button }
     local group = HorizontalGroup:new{
@@ -594,6 +594,7 @@ function ReadStatsView:init()
         title_top_padding = Screen:scaleBySize(6),    -- same vertical padding too
         align = "center",
         with_bottom_line = false, -- no bottom line / separator below the title
+        bottom_v_padding = Screen:scaleBySize(6.5), -- same as the shelf title bar → tab top sits at the shelf separator's line
         -- X close button removed (bookshelf style): Back key / dock nav close
         show_parent = self,
     }

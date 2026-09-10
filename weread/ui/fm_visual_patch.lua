@@ -12,6 +12,8 @@
 
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
+local LineWidget = require("ui/widget/linewidget")
+local Blitbuffer = require("ffi/blitbuffer")
 local Screen = require("device").screen
 local logger = require("logger")
 
@@ -40,6 +42,31 @@ local function installTitleFaceHook()
         end
         local res = orig_init(self, ...)
         if is_fm then
+            -- separator directly under the 书库 title row (weread position),
+            -- not at the whole header bottom (which includes the path subtitle)
+            if not self._wr_fm_sep then
+                local w = Screen:getWidth()
+                local inset = Screen:scaleBySize(24)
+                local title_h = 0
+                if self.title_widget and self.title_widget.getSize then
+                    local ok_s, sz = pcall(function()
+                        return self.title_widget:getSize()
+                    end)
+                    if ok_s and sz then title_h = sz.h or 0 end
+                end
+                local y = math.max(1, math.floor(title_h)
+                    + Screen:scaleBySize(6.5))
+                local sep = LineWidget:new{
+                    dimen = Geom:new{
+                        w = math.max(1, w - 2 * inset),
+                        h = Screen:scaleBySize(1),
+                    },
+                    background = Blitbuffer.gray(0.72),
+                }
+                sep.overlap_offset = { inset, y }
+                table.insert(self, sep)
+                self._wr_fm_sep = true
+            end
             self._wr_fm_title_done = true
         end
         return res
@@ -67,6 +94,99 @@ local function liftFMContent()
 end
 
 local mosaic_hook_installed = false
+
+--- Pager (页码导航器) sizing: mirror SimpleUI's own resize hook, but force the
+--- compact values (icon 18 / text 14) when the user is on the DEFAULT
+--- pagination size ("s"). Implemented as a runtime patch so no SimpleUI
+--- source file is modified and upgrades can't lose it.
+local PAGER_ICON_SZ = 18
+local PAGER_FONT_SZ = 14
+
+local function installPagerSizePatch()
+    local ok_b, B = pcall(require, "screens/sui_bottombar")
+    if not ok_b or not B or type(B.resizePaginationButtons) ~= "function" then
+        logger.info("wrFmPatch: sui_bottombar unavailable, pager size patch skipped")
+        return
+    end
+    if B._wr_pager_size_patched then return end
+    B._wr_pager_size_patched = true
+    local orig_resize = B.resizePaginationButtons
+    B.resizePaginationButtons = function(widget, icon_size)
+        local res = orig_resize(widget, icon_size)
+        pcall(function()
+            if not widget then return end
+            local names = {
+                "page_info_left_chev", "page_info_right_chev",
+                "page_info_first_chev", "page_info_last_chev",
+            }
+            for _, n in ipairs(names) do
+                local btn = widget[n]
+                if btn and btn.init then
+                    btn.icon_width = Screen:scaleBySize(PAGER_ICON_SZ)
+                    btn.icon_height = Screen:scaleBySize(PAGER_ICON_SZ)
+                    btn:init()
+                end
+            end
+            local txt = widget.page_info_text
+            if txt and txt.init then
+                txt.text_font_size = PAGER_FONT_SZ
+                txt:init()
+            end
+        end)
+        return res
+    end
+    logger.info("wrFmPatch: pager size patch installed (icon " .. PAGER_ICON_SZ
+        .. " / font " .. PAGER_FONT_SZ .. ", unconditional)")
+
+    -- apply to the currently live FM pager as well
+    pcall(function()
+        local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+        local fm = ok_f and FM.instance
+        local fc = fm and (fm.file_chooser or (fm.ui and fm.ui.file_chooser))
+        if fc then B.resizePaginationButtons(fc, B.getPaginationIconSize and B.getPaginationIconSize() or 0) end
+    end)
+end
+
+local function installPagerTextPatch()
+    local ok_fc, FC = pcall(require, "ui/widget/filechooser")
+    if not ok_fc or not FC or type(FC.updatePageInfo) ~= "function" or FC._wr_xy_patched then
+        return
+    end
+    FC._wr_xy_patched = true
+    local orig = FC.updatePageInfo
+    FC.updatePageInfo = function(self, ...)
+        -- local-bookshelf pager: match the weread pager's icon spacing (27px
+        -- spacer) and show the page number as "x/y" instead of "第 x 页，共 y 页"
+        if self.page_info_spacer then
+            self.page_info_spacer.width = Screen:scaleBySize(21)
+        end
+        local res = orig(self, ...)
+        pcall(function()
+            if self.page_info_text and self.page_num and self.page_num >= 1 then
+                self.page_info_text:setText(
+                    tostring(self.page or 1) .. "/" .. tostring(self.page_num))
+            end
+            -- HorizontalGroup caches its offsets; without this the new spacer
+            -- width / shorter text never reflow
+            if self.page_info and self.page_info.resetLayout then
+                self.page_info:resetLayout()
+            end
+            local ok_ui, UIManager = pcall(require, "ui/uimanager")
+            if ok_ui and UIManager then
+                UIManager:setDirty(self.show_parent or "all", "ui")
+            end
+        end)
+        return res
+    end
+    logger.info("wrFmPatch: pager spacing/format patch installed (21px, x/y)")
+    -- apply to the live FM pager as well
+    pcall(function()
+        local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+        local fm = ok_f and FM.instance
+        local fc = fm and (fm.file_chooser or (fm.ui and fm.ui.file_chooser))
+        if fc and type(fc.updatePageInfo) == "function" then fc:updatePageInfo() end
+    end)
+end
 
 local function installMosaicMarginHook()
     local ok_m, MM = pcall(require, "mosaicmenu")
@@ -114,6 +234,8 @@ function M.apply()
         UIManager:scheduleIn(1.5, function()
             pcall(liftFMContent)
             pcall(installMosaicMarginHook)
+            pcall(installPagerSizePatch)
+            pcall(installPagerTextPatch)
         end)
     else
         pcall(installMosaicMarginHook)

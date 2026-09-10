@@ -34,7 +34,6 @@ local function tr(text) return I18n.tr(text) end
 local CachedCorner = Widget:extend{
     size = 0,
 }
-
 function CachedCorner:init()
     self.size = math.max(1, math.floor(tonumber(self.size) or 1))
     self.dimen = Geom:new{ w = self.size, h = self.size }
@@ -47,6 +46,55 @@ function CachedCorner:paintTo(bb, x, y)
         local width = self.size - row
         bb:paintRect(x + row, y + row, width, 1, Blitbuffer.COLOR_BLACK)
     end
+end
+
+-- Transparent tap pad: layout footprint stays button-sized (like the local
+-- bookshelf chevron buttons) while the touch range extends beyond it, so both
+-- pagers share identical geometry and only the hit area differs.
+local TapPad = InputContainer:extend{
+    width = nil,
+    height = nil,
+    touch_size = nil,
+    inner = nil,
+    enabled = true,
+    callback = nil,
+}
+
+function TapPad:init()
+    self.dimen = Geom:new{ w = self.width, h = self.height }
+    self[1] = CenterContainer:new{
+        dimen = self.dimen:copy(),
+        self.inner,
+    }
+    local touch = self.touch_size or self.width
+    self.ges_events = {
+        TapPad = {
+            range = function()
+                return Geom:new{
+                    x = self.dimen.x - math.floor((touch - self.dimen.w) / 2),
+                    y = self.dimen.y - math.floor((touch - self.dimen.h) / 2),
+                    w = touch, h = touch,
+                }
+            end,
+        },
+    }
+end
+
+function TapPad:onTapPad()
+    -- forward the tap to the inner Button so its highlight/feedback plays
+    -- exactly as if the button itself had been pressed
+    if self.enabled and self.inner and self.inner.onTapSelectButton then
+        return self.inner:onTapSelectButton()
+    end
+    return true
+end
+
+function TapPad:onFocus()
+    return self.inner and self.inner:onFocus()
+end
+
+function TapPad:onUnfocus()
+    return self.inner and self.inner:onUnfocus()
 end
 
 local ShelfRow = InputContainer:extend{
@@ -626,88 +674,74 @@ function LibraryView:content()
     return content
 end
 
+--- Unified narrow pager above the dock (bookshelf + public-account list):
+---   « 首页|上一页 | x/y | 下一页|末页 »
+--- « / » = jump to first / last page; 上一页/下一页 are text; every control
+--- keeps the bookshelf ratio (text line + 1px vertical padding).
 function LibraryView:pageBar()
     if not self.paged or (self.page_count or 1) <= 1 then return nil end
-    if self.mode == "public_account" then
-        return self:pubPageBar()
-    end
-    local cell_w = math.floor(self.screen_w / 3)
-    local button_height = Screen:scaleBySize(54)
-    local previous = Button:new{
-        text = tr("Previous"), width = cell_w, height = button_height,
-        text_font_size = 22, text_font_bold = true, radius = 0, margin = 0,
-        bordersize = 0, enabled = self.page > 1, show_parent = self,
-        callback = function()
-            if self.page > 1 and self.on_page_changed then
-                self.on_page_changed(self.page - 1)
-            end
-        end,
-    }
-    local page_text = Button:new{
-        text = T(tr("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
-        width = cell_w, height = button_height, text_font_size = 18,
-        radius = 0, margin = 0, bordersize = 0,
-        enabled = false, show_parent = self,
-    }
-    local next_page = Button:new{
-        text = tr("Next"), width = self.screen_w - 2 * cell_w,
-        height = button_height, text_font_size = 22, text_font_bold = true,
-        radius = 0, margin = 0, bordersize = 0,
-        enabled = self.page < self.page_count, show_parent = self,
-        callback = function()
-            if self.page < self.page_count and self.on_page_changed then
-                self.on_page_changed(self.page + 1)
-            end
-        end,
-    }
-    self._page_buttons = { previous, page_text, next_page }
-    return HorizontalGroup:new{ previous, page_text, next_page }
+    return self:koPager()
 end
 
---- Public-account (公众号) pager: one slim centred row above the dock.
---- Backgrounds are proportional to their text: every control button is
---- sized as text-line + same small vertical padding (like the tab and the
---- action buttons), so small 14px text gets a proportionally smaller bar.
-function LibraryView:pubPageBar()
-    local pad = Screen:scaleBySize(1)
-    local function mk(text, fs, bold, enabled, cb)
-        return Button:new{
-            text = text, text_font_size = fs,
-            text_font_bold = bold, enabled = enabled,
-            padding_v = pad, radius = 0, margin = 0, bordersize = 0,
-            show_parent = self, callback = cb,
+function LibraryView:koPager()
+    local icon_sz = Screen:scaleBySize(18)
+    local gap = Screen:scaleBySize(21) -- same as the FM pager spacer
+    local total = math.max(1, self.page_count or 1)
+    local cur = math.max(1, math.min(self.page or 1, total))
+    local function jump(p)
+        p = math.max(1, math.min(total, p))
+        if p ~= cur and self.on_page_changed then
+            self.on_page_changed(p)
+        end
+    end
+    local function chev(icon, enabled, cb)
+        local btn = Button:new{
+            icon = icon,
+            icon_width = icon_sz,
+            icon_height = icon_sz,
+            bordersize = 0,
+            enabled = enabled,
+            show_parent = self,
+            callback = cb,
+        }
+        -- layout footprint = the FM chevron button's (icon + its 2px padding),
+        -- touch area grows beyond it
+        local footprint = icon_sz + 2 * Screen:scaleBySize(2)
+        local touch = footprint + 2 * Screen:scaleBySize(13)
+        return TapPad:new{
+            width = footprint,
+            height = footprint,
+            touch_size = touch,
+            inner = btn,
+            enabled = enabled,
         }
     end
-    local previous = mk(tr("Previous"), 14, true, self.page > 1, function()
-        if self.page > 1 and self.on_page_changed then
-            self.on_page_changed(self.page - 1)
-        end
-    end)
-    local next_page = mk(tr("Next"), 14, true, self.page < self.page_count, function()
-        if self.page < self.page_count and self.on_page_changed then
-            self.on_page_changed(self.page + 1)
-        end
-    end)
+    local first = chev("chevron.first", cur > 1, function() jump(1) end)
+    local left = chev("chevron.left", cur > 1, function() jump(cur - 1) end)
+    local right = chev("chevron.right", cur < total, function() jump(cur + 1) end)
+    local last = chev("chevron.last", cur < total, function() jump(total) end)
     local page_text = Button:new{
-        text = T(tr("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
-        text_font_size = 14, text_font_bold = false,
-        enabled = false, padding_v = pad,
-        radius = 0, margin = 0, bordersize = 0,
+        text = T("%1/%2", tostring(cur), tostring(total)),
+        text_font_size = 14,
+        text_font_bold = false,
+        bordersize = 0,
+        enabled = true,
         show_parent = self,
     }
-    self._page_buttons = { previous, page_text, next_page }
-    local group = HorizontalGroup:new{
-        previous,
-        HorizontalSpan:new{ width = Screen:scaleBySize(8) },
-        page_text,
-        HorizontalSpan:new{ width = Screen:scaleBySize(8) },
-        next_page,
-    }
-    local gh = math.max(1, group:getSize().h)
+    self._page_buttons = { first, left, right, last, page_text }
+    local function sp() return HorizontalSpan:new{ width = gap } end
     return CenterContainer:new{
-        dimen = Geom:new{ w = self.screen_w, h = gh },
-        group,
+        dimen = Geom:new{ w = self.screen_w, h = math.max(1, icon_sz) },
+        HorizontalGroup:new{
+            first, sp(), left, sp(), page_text, sp(), right, sp(), last,
+        },
     }
+end
+
+--- Legacy alias kept for the method-inventory check; the shelf pager above
+--- now serves both bookshelf and public-account pages.
+function LibraryView:pubPageBar()
+    return self:pageBar()
 end
 
 function LibraryView:init()
@@ -766,6 +800,7 @@ function LibraryView:init()
         title_top_padding = Screen:scaleBySize(6), -- same vertical padding as FM TitleBar → same title height
         align = "center",
         with_bottom_line = false, -- the bottom line below is drawn by title_sep
+        bottom_v_padding = Screen:scaleBySize(6.5), -- fine-tune: line sits ~3.5 higher under the title
         right_icon_size_ratio = 0.75,
         -- personal fork: the X close button is hidden (cleaner top bar).
         -- Closing still works via the physical Back key (key_events.Close)
@@ -793,9 +828,11 @@ function LibraryView:init()
     self.bottom_gap = bottom_gap
     local dock = self:bottomDock(bottom_gap)
     local dock_h = dock and bottom_gap or 0
+    -- pager sits G px above the dock separator (tuned visually: shelf gap + 1px)
+    local pager_gap = Screen:scaleBySize(8)
     local scroll_h = math.max(1, self.screen_h - top_gap - dock_h
         - self.title_bar:getHeight() - title_sep:getSize().h
-        - tool:getSize().h - (page_bar and page_bar:getSize().h or 0))
+        - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
     -- Public-account list: auto-fit the rows per page to the viewport, so no
     -- dead line is left between the list and the pager (page rows are NOT
     -- hard-coded here; they follow the available scroll height).
@@ -818,7 +855,7 @@ function LibraryView:init()
             page_bar = self:pageBar()
             scroll_h = math.max(1, self.screen_h - top_gap - dock_h
                 - self.title_bar:getHeight() - title_sep:getSize().h
-                - tool:getSize().h - (page_bar and page_bar:getSize().h or 0))
+                - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
         end
     end
     if self.cover_mode and self.mode == "books" then
@@ -832,6 +869,22 @@ function LibraryView:init()
         show_parent = self,
         VerticalGroup:new{ align = "left", content },
     }
+    -- ScrollableContainer registers full-SCREEN gesture ranges, and it sits
+    -- before the pager in the tree (propagation is children-first, ascending),
+    -- so it would swallow taps meant for the pager row. Clamp its ranges to
+    -- its own area (semantically correct anyway).
+    --[[ TEMP disabled for A/B test (was: clamp scroll gesture ranges so they
+         don't swallow pager taps)
+    pcall(function()
+        local area = Geom:new{ x = 0, y = 0, w = self.screen_w, h = scroll_h }
+        for _, ev in pairs(scroll.ges_events or {}) do
+            if type(ev) == "table" then
+                local gr = ev.range and ev or ev[1]
+                if gr and gr.range then gr.range = area end
+            end
+        end
+    end)
+    ]]
     -- One row holds the tabs plus the right-aligned actions (tool row).
     local tool_buttons = {}
     for _, button in ipairs(self._tab_buttons) do
@@ -865,6 +918,7 @@ function LibraryView:init()
                 VerticalGroup:new{
                     align = "left", self.title_bar, title_sep, tool, scroll,
                     page_bar or VerticalSpan:new{ width = 0 },
+                    VerticalSpan:new{ width = pager_gap },
                 },
             },
             VerticalSpan:new{ width = bottom_gap - dock_h },
