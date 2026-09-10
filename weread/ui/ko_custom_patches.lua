@@ -423,6 +423,31 @@ end
 -- ---------------------------------------------------------------------------
 local fm_toolbar_installed = false
 
+-- ---------------------------------------------------------------------------
+-- FM header geometry — single source of truth. Coordinate frame is the
+-- TitleBar's top edge, which is exactly where the SimpleUI status bar's bottom
+-- edge sits (the FM content is laid out below it), so all values below are
+-- effectively measured from the status-bar bottom line:
+--   title     : drawn by TitleBar itself (anchor + TitleBar's own padding)
+--   separator : title text box bottom + LINE_GAP      (hugs the title by design)
+--   icons row : separator bottom (1px) + ICON_GAP, or ICONS_Y when set
+--   subtitle  : icon box vertical centre + SUB_SHIFT, or SUB_Y when set
+-- ICONS_Y / SUB_Y are optional overrides: leave them nil and each element is
+-- derived from the row above it (so changing the title font / icon box keeps
+-- the whole block aligned automatically); set one to a bar-relative number to
+-- pin just that element.
+local FM_HDR = {
+    LINE_GAP   = 6.5,  -- separator offset below the title row
+    ICON_GAP   = 9,    -- toolbar row offset below the separator
+    SUB_SHIFT  = -4,   -- subtitle fine-tune around its row centring
+    SIDE       = 24,   -- left/right inset (aligned with the separator ends)
+    ICON_PX    = 26,   -- icon glyph size
+    ICON_PAD   = 8,    -- invisible tap padding added to the glyph box
+    ICON_GAP_X = 16,   -- spacing between icons
+    ICONS_Y    = nil,  -- optional override: pin the toolbar row (nil = derive)
+    SUB_Y      = nil,  -- optional override: pin the subtitle    (nil = derive)
+}
+
 local function shrinkFMButton(btn, box, glyph)
     pcall(function()
         btn.width  = box
@@ -495,10 +520,10 @@ layoutFMToolbar = function(fm_self)
     if not tb or fm_toolbar_laying_out then return end
     fm_toolbar_laying_out = true
     local sw    = Screen:getWidth()
-    local glyph = Screen:scaleBySize(26)
-    local box   = glyph + Screen:scaleBySize(8) -- invisible tap padding
-    local gap   = Screen:scaleBySize(16)
-    local side  = Screen:scaleBySize(24)
+    local glyph = Screen:scaleBySize(FM_HDR.ICON_PX)
+    local box   = glyph + Screen:scaleBySize(FM_HDR.ICON_PAD)
+    local gap   = Screen:scaleBySize(FM_HDR.ICON_GAP_X)
+    local side  = Screen:scaleBySize(FM_HDR.SIDE)
 
     local ok = pcall(function()
         ensureBarOrigin(tb)
@@ -509,8 +534,9 @@ layoutFMToolbar = function(fm_self)
                 title_h = tb.title_widget:getSize().h or 0
             end
         end)
-        local sep_y = math.floor(title_h) + Screen:scaleBySize(6.5)
-        local y     = sep_y + 1 + Screen:scaleBySize(9)
+        local sep_y = math.floor(title_h) + Screen:scaleBySize(FM_HDR.LINE_GAP)
+        local y     = FM_HDR.ICONS_Y
+            or (sep_y + 1 + Screen:scaleBySize(FM_HDR.ICON_GAP))
 
         -- the four widgets (SimpleUI's injected three + the native right button)
         local widgets = {}
@@ -580,8 +606,10 @@ layoutFMToolbar = function(fm_self)
             end)
             sub._wr_x = math.max(side, math.floor((sw - sub_w) / 2))
             sub._wr_center = true
-            sub._wr_y = y + math.max(0, math.floor((box - sub_h) / 2))
-                - Screen:scaleBySize(4)
+            local sub_y = FM_HDR.SUB_Y
+                or (y + math.max(0, math.floor((box - sub_h) / 2))
+                    + Screen:scaleBySize(FM_HDR.SUB_SHIFT))
+            sub._wr_y = sub_y
             forcePaintAt(sub, tb)
         end
 
