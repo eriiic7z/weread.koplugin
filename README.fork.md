@@ -1,31 +1,35 @@
-# weread.koplugin · 个人 UI 定制版（fork 1.4.2-fork.5）
+# weread.koplugin · 个人 UI 定制版（fork 1.4.2-fork.6）
 
 基于 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的 UI 定制分支，**与 SimpleUI 深度整合**：让 weread 书架看起来、用起来和 SimpleUI 的界面是一套的。仅供个人学习使用，许可证 AGPL-3.0（来源与免责声明见上游 [README.md](README.md) / [NOTICE](NOTICE)）。
 
 ## 这是什么
 
-在上游 weread 完整功能（登录、书架、下载、阅读、同步、划线想法）不变的前提下，把书架界面的视觉与交互统一到 SimpleUI 风格：
+在上游 weread 完整功能（登录、书架、下载、阅读、同步、划线想法）不变的前提下，把界面统一到 SimpleUI 风格，并让阅读统计页同套体验。
 
-- **和 SimpleUI 同一套视觉语言**：书架页顶部让位给 SimpleUI 状态栏、底部使用与 SimpleUI 一致的 dock，两界面来回切换不跳变。
-- **书架封面更干净**：封面细框紧贴封面图，任何比例的封面都完整显示，不拉伸不裁切。
-- **头部一行搞定**：书籍/公众号标签 + 排序/筛选/搜索/刷新合并在一行。
-- **在 weread 里就能用 SimpleUI 的 dock**：书库/主页/电源直达，不再需要先退回 SimpleUI。
-- **顶部下拉原生菜单**：书架顶部点击 / 下滑，与 KOReader 其它页面一样呼出原生主菜单（上次的标签页记忆不变）。
-- **Kindle 式菜单遮罩（全局）**：菜单弹出时页面压暗，外观对标 Kindle 原生下拉（4px 棋盘）；作用于 KOReader 所有原生菜单（书架、文件管理、阅读页），不限于 weread。
-- **前光快捷手势**：左缘上下滑 / 双指上下滑直接调光，原生通知反馈。
-- **阅读统计页同样接入宿主外壳**：从 dock 打开统计 = 统计页自带状态栏与底部导航栏（dock 高亮统计项），与书架同一套体验。
-- **dock 图标 / 项目灵活跟随 SimpleUI**：dock 图标与名称直接读 SimpleUI 的注册表——在 SimpleUI 里换图标、加自定义快捷项、改名，书架与统计 dock 自动跟随。
-- **书架页视觉对齐本地书库（FM）**：顶部标题「微信读书」及其下分隔线、封面网格的左右留白均与 FM「书库」同参对齐；封面下书名与本地书库列表行同字体规格；「书籍 / 公众号」tab 高亮为直角小矩形、激活指示线与 dock 分隔线同粗。
-- **公众号列表与阅读统计同套视觉**：与书架一致的 24px 边距与字号规范；公众号每页行数按屏高自动装行、页码居中窄条；统计页标题/卡片/周期 tab/导航与书架统一，滚动条浅灰细窄。
-- **dock 点击不再闪屏**：书架当前页点 weread 图标无反应、点统计直达（修复回调参数错位）；dock 高亮条恢复。
+### 外观与布局
+
+- **同一套视觉语言**：书架页顶部让位给 SimpleUI 状态栏、底部使用与 SimpleUI 一致的 dock，来回切换不跳变。
+- **视觉规范统一**：书架 / 公众号 / 统计三处一致的字号与 24px 边距；「书籍 / 公众号」tab 高亮为直角小矩形、激活指示线与 dock 分隔线同粗。
+- **对齐本地书库（FM）**：顶部标题「微信读书」的字号与高度、标题下分隔线、封面网格左右留白、封面下书名与作者，均与 FM「书库」同参；分页器同款（chevron 图标 + `x/y` 页码、同几何间距），书架 / 公众号 / 本地书库一致。
+- **头部紧凑**：书籍 / 公众号标签与排序 / 筛选 / 搜索 / 刷新合并在一行。
+- **封面更干净**：细框紧贴封面图，任何比例的封面都完整显示，不拉伸不裁切。
+
+### 交互
+
+- **页内直接使用 SimpleUI 的 dock**：书库 / 主页 / 电源直达，不再需要先退回 SimpleUI；dock 图标与项目跟随 SimpleUI 配置（换图标、加自定义项、改名自动同步）；当前页项无操作并高亮，点统计项直达统计页（详见「使用要点」）。
+- **顶部手势**：书架顶部点击 / 下滑呼出 KOReader 原生主菜单（保留上次标签页记忆）。
+- **前光手势**：左缘上下滑或双指上下滑直接调光，原生通知反馈。
+- **Kindle 式菜单遮罩（全局）**：任何 KOReader 原生菜单（书架 / 文件管理 / 阅读页）弹出时，菜单下方页面压暗（4px 棋盘），不限于 weread。
+
+### 阅读统计页
+
+- 从 dock 打开统计：统计页自带状态栏与底部导航栏（dock 高亮统计项），与书架同一套体验；在阅读器内打开则保持官方全屏样式。
 
 ## 安装
 
 1. 确认已安装 **KOReader ≥ 2026.03** 与 **SimpleUI**。
 2. 用本仓库内容替换 Kindle 上的插件目录：将本目录整体拷贝覆盖到 `koreader/plugins/weread.koplugin/`（本 fork 与上游同版本部署方式）。
 3. 重启 KOReader。
-
-> 开发期在 Mac 与 Kindle 间同步的命令见下文「维护者同步」。
 
 ## 前置：在 SimpleUI 里放一个「weread」入口
 
@@ -36,40 +40,24 @@
 
 ## 使用要点
 
-- 顶部标题栏**没有 ✕ 关闭按钮**：离开 weread 用底部 dock（书库/主页）。
-- 书架 dock 除 SimpleUI 项外，可含**指向 weread 的功能项**（如阅读统计）：点统计 = 直达统计页（书架带 dock/状态栏外壳）；在任意 SimpleUI 屏的 dock 点统计同样带外壳；统计页 dock 点「微信读书」项回书架。
-- 阅读统计页在**阅读器内**打开仍为官方全屏样式（无外壳）。
-- 底部 dock 各档行为：
-  - **书库 / 设置 / 历史**：离开 weread 并跳到 SimpleUI 对应屏；
-  - **主页**：直接切到 SimpleUI 主页（无中间跳帧）；
-  - **电源**：在 weread 页内直接弹出电源菜单（重启 / 休眠 / 退出），退出会正常保存数据；
-  - **weread**：当前页。
-- **顶部带手势**（书架页顶部，SimpleUI 状态栏所在区域）：点击、或从顶部下滑（含顶部中间扩展带）→ 呼出 KOReader 原生主菜单；左缘 1/8 上下滑、或双指上下滑 → 调整前光。
-- **菜单遮罩为全局行为**：安装本 fork 后，KOReader 任何原生菜单（书架 / 文件管理 / 阅读页）弹出时菜单下方都会压暗（Kindle 式棋盘）；由本插件在启动时的一次性运行时补丁实现，禁用 / 卸载本插件即不生效。
-- 页码导航与上游一致（单页不显示）。
+1. **离开 weread**：顶部标题栏没有 ✕ 关闭按钮，用底部 dock（书库 / 主页）。
+2. **底部 dock 各档行为**：
+   - **书库 / 设置 / 历史**：离开 weread 并跳到 SimpleUI 对应屏；
+   - **主页**：直接切到 SimpleUI 主页（无中间跳帧）；
+   - **电源**：在 weread 页内直接弹出电源菜单（重启 / 休眠 / 退出），退出会正常保存数据；
+   - **weread**：当前页（无操作），并显示当前页高亮。
+3. **阅读统计页**：在书架 dock 或任意 SimpleUI 屏的 dock 点统计 = 带外壳直达（书架 / 公众号的统计入口同理）；统计页 dock 点「微信读书」项回书架；在阅读器内打开统计仍为官方全屏。
+4. **手势**：顶部带（SimpleUI 状态栏所在区域）点击或下滑 → 呼出 KOReader 原生主菜单；左缘 1/8 上下滑或双指上下滑 → 调整前光。
+5. **页码导航**：单页时不显示；书架 / 公众号与本地书库为同款样式。
+6. **菜单遮罩**：全局行为，禁用 / 卸载本插件即不生效。
 
 ## 已知边界
 
-- 镜像的是 SimpleUI 的 **default / icons / 不透明** 配置；若在 SimpleUI 里切换 dock 的 bar style（framed/bare）、显示模式（text/both）或透明背景，本 fork 的 dock 暂不跟随。
-- dock 依赖 SimpleUI 的设置文件结构（`settings/simpleui/sui_settings.lua`），SimpleUI 大版本如改动存储结构可能需要适配。
-- **统计页内容区左缘单指调光暂不支持**（单指左缘与内容滚动为同一手势通道，物理冲突；书架页左缘单指调光正常可用）。统计页可用**双指**调光。
+- 镜像的是 SimpleUI 的 **default / icons / 不透明** 配置；若切换 dock 的 bar style（framed/bare）、显示模式（text/both）或透明背景，本 fork 的 dock 暂不跟随。
+- dock 依赖 SimpleUI 的设置文件结构（`settings/simpleui/sui_settings.lua`）；对 SimpleUI 的分页尺寸与本地书库视觉适配以运行时补丁实现，不改 SimpleUI 源文件——SimpleUI 大版本更新后需复核。
+- **统计页内容区左缘单指调光暂不支持**（与内容滚动为同一手势通道，物理冲突）；统计页可用**双指**调光，书架页左缘单指调光正常可用。
 - **SimpleUI 顶部下拉面板的电源 → 退出**，在遮罩启用且 weread 全屏页在场时可能卡住（SimpleUI 面板未适配第三方全屏页叠加）。**请用底部 dock 的电源退出**（页内电源菜单，正常）。
 - **e-ink 残影**：原生菜单「长 → 短」切换瞬间，让出区域在 e-ink 屏上可能残留旧帧（关闭菜单即恢复，不影响使用）。
-
-## 维护者同步
-
-- 与上游合并：`git fetch upstream && git merge upstream/main`（在 `main` 分支进行）。
-- 合并约定：**保留**主 README.md 顶部 `<!-- fork-banner -->` 块（以上游冲突时以本 fork 为准）；**不要改动** `_meta.lua` 的 `version` 与上游 CHANGELOG.md 的正式发布段——版本号跟随上游，fork 变更记录见 [CHANGELOG.fork.md](CHANGELOG.fork.md)。
-- Mac → Kindle 同步：
-
-```bash
-rsync -av --delete \
-  --exclude '.git/' --exclude '.gitignore' --exclude '.github/' \
-  --exclude 'spec/' --exclude 'scripts/' --exclude 'docs/' \
-  --exclude 'screenshots/' --exclude 'CHANGELOG.md' --exclude 'CLAUDE.md' \
-  --exclude 'CONTRIBUTING.md' --exclude 'README.fork.md' --exclude 'CHANGELOG.fork.md' \
-  ./ /Volumes/Kindle/koreader/plugins/weread.koplugin/
-```
 
 ## 来源
 

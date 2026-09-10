@@ -2,9 +2,19 @@
 
 本文件记录相对上游 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的定制变更，均位于 `custom` 分支。上游自身的变更见仓库根 [CHANGELOG.md](CHANGELOG.md)；fork 用法与边界见 [README.fork.md](README.fork.md)。
 
-## [1.4.2-fork.5] - 2026-09-09
+## [Unreleased]
 
-书架 / 公众号列表 / 阅读统计三处页面统一到一套视觉规范（字号、24px 边距、控制条“文字行高+1px”比例），并修复 dock 点击闪屏。
+## [1.4.2-fork.6] - 2026-09-10
+
+### 变更
+
+- **书架 / 公众号分页器改为复刻本地书库** — 四个 chevron 图标 + `x/y` 页码，按钮占位与间距与 FM 完全同几何；命中区扩大到约 44px（图标与高亮保持原大小，点击不再需要精准对准）。
+- **本地书库分页器同步同规格** — 图标 18 / 页码字 14 / 间距 21 / `x/y` 文案（位置与高度不变）；分页尺寸覆盖改为插件内的运行时 patch（不再改动 SimpleUI 源文件，升级不丢）。
+- **统计页** — 周月年总 tab 上缘与书架标题分隔线对齐；周期导航去掉无功能的装饰箭头；标题栏底部内距与书架同参。
+- **补丁模块精简** — 菜单遮罩组件并入遮罩补丁，再与本地书库视觉补丁合并为单个 `weread/ui/ko_custom_patches.lua`（删除 `dim_scrim.lua` / `menu_scrim_patch.lua` / `fm_visual_patch.lua`）。
+- **宿主可搬准备（P0）** — 让位带高度改为优先调用 SimpleUI 的 `TOTAL_TOP_H` / `TOTAL_H`（惰性加载 + 失败回退本地公式）；页内电源菜单与前光通知文案改为可由调用方覆盖（`opts.labels`，缺省保持原中文）；确认宿主无任何 weread 专属依赖、内部字段无外部访问。
+
+## [1.4.2-fork.5] - 2026-09-09
 
 ### 变更
 
