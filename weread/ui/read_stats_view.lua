@@ -496,6 +496,33 @@ function ReadStatsView:buildTabBar()
     }
 end
 
+--- Navpager hooks (SimpleUI's bottom-bar mode): the dock-end arrows take over
+--- period navigation, so the in-page 上一周期/下一周期 row is hidden while
+--- navpager is on (and comes back when it is off).
+local function navpagerOn()
+    local ok, cfg = pcall(require, "infra/sui_config")
+    return ok and cfg and cfg.isNavpagerEnabled and cfg.isNavpagerEnabled() or false
+end
+
+function ReadStatsView:navpagerState()
+    local d = self.data or {}
+    return d.allow_prev == true, d.allow_next == true
+end
+
+function ReadStatsView:navpagerGo(dir)
+    if dir == "prev" then
+        self:onPrevPeriod()
+    elseif dir == "next" then
+        self:onNextPeriod()
+    elseif dir == "last" and self.on_latest then
+        -- "jump to newest": the data layer has no period index, but the newest
+        -- period is just "now" (base_time = nil) — one reload, no loop.
+        self.on_latest()
+    end
+    -- "first" (earliest period) is intentionally a no-op: allow_prev is
+    -- unbounded, so there is no reachable earliest period to jump to.
+end
+
 function ReadStatsView:buildNavRow()
     local d = self.data
     if not d.allow_prev and not d.allow_next then
@@ -601,7 +628,10 @@ function ReadStatsView:init()
     }
 
     local tab_bar = self:buildTabBar()
-    local nav_row = self:buildNavRow()
+    local nav_row
+    if not navpagerOn() then
+        nav_row = self:buildNavRow()
+    end
 
     local rows = { self._tab_buttons }
     if nav_row then rows[#rows + 1] = self._nav_buttons end
@@ -709,10 +739,6 @@ function ReadStatsView:onShow()
     self:applyScrollbarColor()
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
-end
-
-function ReadStatsView:onCloseWidget()
-    UIManager:setDirty(nil, function() return "ui", self.dimen end)
 end
 
 function ReadStatsView:onClose()

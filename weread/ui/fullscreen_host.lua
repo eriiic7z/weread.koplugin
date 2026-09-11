@@ -62,6 +62,47 @@ local function sui_store()
     return LuaSettings:open(path)
 end
 
+--- Navpager (SimpleUI's bottom-bar mode): arrows at both ends of the bar.
+-- Resolved through SimpleUI itself so the arrows match its geometry/icons;
+-- when the modules are unavailable we simply behave as "off".
+local function sui_config()
+    local ok, m = pcall(require, "infra/sui_config")
+    return ok and m or nil
+end
+
+local function navpagerEnabled()
+    local cfg = sui_config()
+    if not (cfg and cfg.isNavpagerEnabled) then return false end
+    local ok, on = pcall(cfg.isNavpagerEnabled)
+    return ok and on == true
+end
+
+--- Arrow icon file for the navpager cells (SimpleUI's own default, honouring
+-- the user's per-slot icon override when present).
+local function navpagerIcon(is_prev)
+    local cfg = sui_config()
+    local file = cfg and cfg.ICON
+        and (is_prev and cfg.ICON.nav_prev or cfg.ICON.nav_next) or nil
+    local ok, style = pcall(require, "features/sui_style")
+    if ok and style and style.getIcon then
+        local override = style.getIcon(is_prev and "sui_navpager_prev" or "sui_navpager_next")
+        if override then file = override end
+    end
+    return file
+end
+
+--- State/action hooks the hosting view may provide:
+--   view:navpagerState()        -> has_prev, has_next
+--   view:navpagerGo("prev"|"next")
+-- Without them the arrows stay dimmed and inert.
+function Host:navpagerArrowState()
+    if type(self.navpagerState) == "function" then
+        local ok, prev, nxt = pcall(function() return self:navpagerState() end)
+        if ok then return prev == true, nxt == true end
+    end
+    return false, false
+end
+
 --- Raw per-item SimpleUI config for a dock tab (custom QAs), nil for
 --- built-in ids.
 function Host:dockConfig(id)
@@ -180,6 +221,8 @@ local DockCell = InputContainer:extend{
     active = false,
     indic_h = 0,
     dock_cb = nil,
+    hold_cb = nil, -- long press (navpager arrows: jump to first/last)
+    dimmed = false, -- navpager arrow with no page in that direction
 }
 
 function DockCell:init()
@@ -192,6 +235,7 @@ function DockCell:init()
             height = self.icon_sz,
             is_icon = true,
             alpha = true,
+            dim = self.dimmed or false,
         }
     else
         content = TextWidget:new{
@@ -222,11 +266,19 @@ function DockCell:init()
         TapSelectButton = {
             GestureRange:new{ ges = "tap", range = self.dimen },
         },
+        HoldSelectButton = {
+            GestureRange:new{ ges = "hold", range = self.dimen },
+        },
     }
 end
 
 function DockCell:onTapSelectButton()
     if self.dock_cb then self.dock_cb() end
+    return true
+end
+
+function DockCell:onHoldSelectButton()
+    if self.hold_cb then self.hold_cb() end
     return true
 end
 
@@ -256,26 +308,70 @@ function Host:bottomDock(height)
     local bar_h = math.max(1, height - top_sp - bot_sp)
     local usable_w = math.max(1, self.screen_w - 2 * side_m)
 
-    local cell_w = math.floor(usable_w / #tabs)
-    local row = HorizontalGroup:new{}
     local highlight = self._host and self._host.dock_highlight
-    for index, id in ipairs(tabs) do
-        local width = index == #tabs and usable_w - cell_w * (#tabs - 1) or cell_w
+    local row = HorizontalGroup:new{}
+    local function tabCell(id, width)
         local cfg = self:dockConfig(id)
         local active = highlight and highlight(self, id, cfg) or false
-        local icon = self:dockIconFor(id)
-        local label = self:dockLabel(id)
-        row[#row + 1] = DockCell:new{
+        return DockCell:new{
             width = width,
             height = bar_h,
-            icon = icon,
+            icon = self:dockIconFor(id),
             icon_sz = icon_sz,
-            label = label,
+            label = self:dockLabel(id),
             active = active,
             indic_h = active and indicator_h or 0,
             dock_cb = function() self:onDockTap(id) end,
             show_parent = self,
         }
+    end
+
+    if navpagerEnabled() then
+        -- Navpager mode: prev/next arrow cells at both ends, tabs in between.
+        -- Widths follow SimpleUI's own rule (equal cells, last one absorbs the
+        -- rounding remainder) over center_n + 2 slots.
+        local has_prev, has_next = self:navpagerArrowState()
+        local total_n = #tabs + 2
+        local cell_w  = math.floor(usable_w / total_n)
+        local function w_at(i)
+            return i == total_n and usable_w - cell_w * (total_n - 1) or cell_w
+        end
+        local function arrowCell(is_prev, enabled, index)
+            return DockCell:new{
+                width = w_at(index),
+                height = bar_h,
+                icon = navpagerIcon(is_prev),
+                icon_sz = icon_sz,
+                dimmed = not enabled,
+                dock_cb = function()
+                    if type(self.navpagerGo) == "function" then
+                        pcall(function()
+                            self:navpagerGo(is_prev and "prev" or "next")
+                        end)
+                    end
+                end,
+                hold_cb = function()
+                    if type(self.navpagerGo) == "function" then
+                        pcall(function()
+                            self:navpagerGo(is_prev and "first" or "last")
+                        end)
+                    end
+                end,
+                show_parent = self,
+            }
+        end
+        row[#row + 1] = arrowCell(true, has_prev, 1)
+        for index, id in ipairs(tabs) do
+            row[#row + 1] = tabCell(id, w_at(index + 1))
+        end
+        row[#row + 1] = arrowCell(false, has_next, total_n)
+    else
+        local cell_w = math.floor(usable_w / #tabs)
+        for index, id in ipairs(tabs) do
+            local width = index == #tabs
+                and usable_w - cell_w * (#tabs - 1) or cell_w
+            row[#row + 1] = tabCell(id, width)
+        end
     end
     local sep_bg = Blitbuffer.COLOR_GRAY
     pcall(function() sep_bg = Blitbuffer.gray(0.72) end)
@@ -304,6 +400,9 @@ end
 --- not handle follows the default: power = in-place dialog; navigation /
 --- actions owned by SimpleUI drop this view and replay the tap on FM.
 function Host:onDockTap(tab_id)
+    -- Mark the transition: the repaint coalescer (ko_custom_patches) uses this
+    -- window to collapse the burst of "ui" dirtys the hand-back produces.
+    _G._wr_dock_transition_at = os.time()
     local nav = self._host and self._host.dock_nav
     if nav then
         local cfg = self:dockConfig(tab_id)
@@ -321,6 +420,26 @@ function Host:onDockTap(tab_id)
     local fm = ok and FM.instance
     local plugin = fm and fm._simpleui_plugin
     local function replay()
+        -- Mark the target tab active first so SimpleUI's onTabTap takes its
+        -- "already_active" shortcut: it then skips the eager replaceBar +
+        -- full-screen setDirty, which used to repaint the dock once while this
+        -- page was still on screen (double repaint = the visible flash on
+        -- e-ink). Only safe when the tab IS one of the configured tabs, since
+        -- then its indicator equals the action id (browse actions map to a
+        -- different indicator tab and keep the default path).
+        if plugin and tab_id ~= "homescreen" then
+            pcall(function()
+                local ok_cfg, Config = pcall(require, "infra/sui_config")
+                local tabs = ok_cfg and Config and Config.loadTabConfig
+                    and Config.loadTabConfig() or nil
+                for _, id in ipairs(tabs or {}) do
+                    if id == tab_id then
+                        plugin.active_action = tab_id
+                        break
+                    end
+                end
+            end)
+        end
         if plugin and type(plugin._onTabTap) == "function" then
             pcall(plugin._onTabTap, plugin, tab_id, fm)
         end
@@ -538,7 +657,7 @@ function Host.install(view, opts)
         "reservedBands", "dockTabs", "dockConfig", "dockIconFor", "dockLabel",
         "bottomDock", "onDockTap", "showPowerDialog", "onExit",
         "onFrontlightSwipe", "onTopTapMenu", "onTopSwipeMenu",
-        "registerHostGestures",
+        "registerHostGestures", "navpagerArrowState",
     }) do
         if not view[name] then
             view[name] = Host[name]

@@ -258,6 +258,27 @@ local mosaic_hook_installed = false
 local PAGER_ICON_SZ = 18
 local PAGER_FONT_SZ = 14
 
+--- Grow a button's tap (and hold) range to `touch` px, centred on the button,
+-- without touching its layout footprint or how it paints: GestureRange accepts
+-- a function, so the range is recomputed from the button's live dimen.
+local function widenTouchRange(btn, touch)
+    if not (btn and btn.ges_events and touch) then return end
+    for _, seq in pairs(btn.ges_events) do
+        for _, gs in ipairs(seq) do
+            if gs.ges == "tap" or gs.ges == "hold" then
+                gs.range = function()
+                    local d = btn.dimen
+                    if not d then return nil end
+                    local pad = math.floor((touch - d.w) / 2)
+                    return Geom:new{
+                        x = d.x - pad, y = d.y - pad, w = touch, h = touch,
+                    }
+                end
+            end
+        end
+    end
+end
+
 local function installPagerSizePatch()
     local ok_b, B = pcall(require, "screens/sui_bottombar")
     if not ok_b or not B or type(B.resizePaginationButtons) ~= "function" then
@@ -282,6 +303,11 @@ local function installPagerSizePatch()
                     btn.icon_height = Screen:scaleBySize(PAGER_ICON_SZ)
                     btn:init()
                 end
+            end
+            -- btn:init() rebuilds ges_events, so widen after it
+            local touch = Screen:scaleBySize(TitleMetrics.TOUCH)
+            for _, n in ipairs(names) do
+                widenTouchRange(widget[n], touch)
             end
             local txt = widget.page_info_text
             if txt and txt.init then
@@ -309,6 +335,68 @@ local function installPagerTextPatch()
         return
     end
     FC._wr_xy_patched = true
+    -- Single page: there is nothing to paginate, so hide KOReader's footer
+    -- pager row and reclaim its height, exactly like the weread shelf does.
+    -- (Menu:updatePageInfo re-shows the chevrons on every build, so this runs
+    -- after each build; the height comes from _recalculateDimen, which is
+    -- wrapped below to temporarily zero the widgets it measures.)
+    local PAGER_BTNS = { "page_info_left_chev", "page_info_right_chev",
+                         "page_info_first_chev", "page_info_last_chev" }
+    local function hidePagerRow(fc)
+        for _, n in ipairs(PAGER_BTNS) do
+            local b = fc[n]
+            if b and b.hide then b:hide() end
+        end
+        if fc.page_info_text then fc.page_info_text:setText("") end
+        -- Without these the row keeps painting the previously drawn (grey)
+        -- "x/y" until some other repaint happens.
+        if fc.page_info and fc.page_info.resetLayout then fc.page_info:resetLayout() end
+        local ok_ui, UIMgr = pcall(require, "ui/uimanager")
+        if ok_ui and UIMgr then
+            UIMgr:setDirty(fc.show_parent or fc, "ui")
+        end
+    end
+    local orig_update_items = FC.updateItems
+    if type(orig_update_items) == "function" and not FC._wr_single_page_patched then
+        FC._wr_single_page_patched = true
+        FC.updateItems = function(self, ...)
+            local res = orig_update_items(self, ...)
+            local single = (self.page_num or 1) <= 1
+            if single ~= self._wr_single_page then
+                self._wr_single_page = single
+                -- relayout once so the list takes (or gives back) the freed
+                -- footer height
+                res = orig_update_items(self, ...)
+            end
+            -- Always last: the rebuild above ends with updatePageInfo, which
+            -- re-shows the chevrons and rewrites "x/y".
+            if single then hidePagerRow(self) end
+            return res
+        end
+        local orig_recalc = FC._recalculateDimen
+        if type(orig_recalc) == "function" then
+            FC._recalculateDimen = function(self, ...)
+                if not self._wr_single_page then return orig_recalc(self, ...) end
+                -- shrink the two widgets its bottom_height measures, call the
+                -- original, then restore (so a later show() still works)
+                local saved = {}
+                local function shrink(w)
+                    if w and w.dimen then
+                        saved[w] = { w.dimen.w, w.dimen.h }
+                        w.dimen.w, w.dimen.h = 0, 0
+                    end
+                end
+                shrink(self.page_info_text)
+                shrink(self.page_return_arrow)
+                local ok, res = pcall(orig_recalc, self, ...)
+                for w, wh in pairs(saved) do
+                    w.dimen.w, w.dimen.h = wh[1], wh[2]
+                end
+                if not ok then error(res) end
+                return res
+            end
+        end
+    end
     local orig = FC.updatePageInfo
     FC.updatePageInfo = function(self, ...)
         -- local-bookshelf pager: match the weread pager's icon spacing (27px
@@ -414,6 +502,149 @@ end
 local layoutFMToolbar
 local installFMToolbarPatch
 
+--- SimpleUI's navpager arrows only jump to first/last on hold_RELEASE (see its
+--- navbar_hold_settings zone), while our mirrored dock arrows act as soon as
+--- the hold fires. Patch the zones registered on the FileManager so both feel
+--- the same: the jump happens while the finger is still down, and the later
+--- hold_release does not fire a second time. Arrow boundaries are read from
+--- SimpleUI's own navbar_pos_prev/next zones, so its geometry stays the source
+--- of truth.
+local function installNavpagerHoldPatch()
+    local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+    local fm = ok_f and FM.instance
+    if not fm or type(fm.registerTouchZones) ~= "function" then return end
+    if fm._wr_navpager_hold_patched then return end
+    fm._wr_navpager_hold_patched = true
+    local orig_register = fm.registerTouchZones
+    fm.registerTouchZones = function(self, zones)
+        pcall(function()
+            local ok_cfg, Config = pcall(require, "infra/sui_config")
+            if not (ok_cfg and Config and Config.isNavpagerEnabled
+                    and Config.isNavpagerEnabled()) then return end
+            local sw = Screen:getWidth()
+            local prev_end_x, next_x, hold_start, hold_settings
+            for _, z in ipairs(zones or {}) do
+                local sz = z.screen_zone
+                if z.id == "navbar_pos_prev" and sz then
+                    prev_end_x = (sz.ratio_x + sz.ratio_w) * sw
+                elseif z.id == "navbar_pos_next" and sz then
+                    next_x = sz.ratio_x * sw
+                elseif z.id == "navbar_hold_start" then
+                    hold_start = z
+                elseif z.id == "navbar_hold_settings" then
+                    hold_settings = z
+                end
+            end
+            if not (hold_start and hold_settings and prev_end_x and next_x) then
+                return
+            end
+            local handled = false
+            local function hasDir(dir)
+                local prev, nxt = false, false
+                if Config.getNavpagerState then
+                    local ok_s, p, n = pcall(Config.getNavpagerState)
+                    if ok_s then prev, nxt = p, n end
+                end
+                if dir == "prev" then return prev == true end
+                return nxt == true
+            end
+            local function gotoPage(page)
+                local fc = self.file_chooser or self
+                if type(fc.onGotoPage) == "function"
+                        and type(fc.page_num) == "number" then
+                    pcall(function() fc:onGotoPage(page or fc.page_num) end)
+                end
+            end
+            local orig_start = hold_start.handler
+            hold_start.handler = function(ges)
+                local x = ges and ges.pos and ges.pos.x or -1
+                -- jump while the finger is still down, like our dock arrows
+                if x >= 0 and x < prev_end_x then
+                    if hasDir("prev") then gotoPage(1) end
+                    handled = true
+                    return true
+                elseif next_x and x >= next_x then
+                    if hasDir("next") then gotoPage(nil) end
+                    handled = true
+                    return true
+                end
+                handled = false
+                if orig_start then return orig_start(ges) end
+                return true
+            end
+            local orig_settings = hold_settings.handler
+            hold_settings.handler = function(ges)
+                if handled then
+                    handled = false -- already jumped on hold; swallow the release
+                    return true
+                end
+                if orig_settings then return orig_settings(ges) end
+                return true
+            end
+        end)
+        return orig_register(self, zones)
+    end
+end
+
+--- Collapse the burst of repaint requests a dock transition produces.
+-- Leaving a weread page hands the screen back to the FileManager, and several
+-- independent modules ask for a repaint in the same instant: SimpleUI dirties
+-- the title strip from three different call sites (screens/sui_titlebar.lua,
+-- infra/sui_patches.lua x2), coverbrowser dirties the item list, and closing
+-- the page dirties its own area. Their union is the whole screen, and because
+-- the requests are spread over a few event-loop ticks the e-ink panel ends up
+-- doing several full-screen-ish refreshes -> a visible flash.
+--
+-- We do not modify those upstream/plugin sources, so instead we collapse plain
+-- "ui" repaints of the SAME widget+region that arrive within 0.6s of a weread
+-- dock tap: only the first is issued, the rest are redundant (the final state
+-- is identical). Scoped to the transition window, so nothing else is affected.
+local function installDirtyCoalesce()
+    local UIMgr = require("ui/uimanager")
+    if UIMgr._wr_dirty_coalesced then return end
+    UIMgr._wr_dirty_coalesced = true
+    -- Refreshtype may itself be a function returning (mode, region).
+    local function resolve(refreshtype, refreshregion)
+        if type(refreshtype) == "function" then
+            local ok, t, r = pcall(refreshtype)
+            if ok then return t, r end
+            return nil, refreshregion
+        end
+        return refreshtype, refreshregion
+    end
+    local function keyOf(widget, rtype, rregion)
+        local w
+        if type(widget) == "table" then
+            w = widget.name or widget.id or tostring(widget)
+        else
+            w = tostring(widget)
+        end
+        local reg = "-"
+        if type(rregion) == "table" and rregion.w and rregion.h then
+            reg = rregion.w .. "x" .. rregion.h .. "@"
+                .. (rregion.x or 0) .. "," .. (rregion.y or 0)
+        end
+        return w .. "|" .. tostring(rtype) .. "|" .. reg
+    end
+    local orig_set = UIMgr.setDirty
+    local recent = {}
+    UIMgr.setDirty = function(self, widget, refreshtype, refreshregion, ...)
+        local t = _G._wr_dock_transition_at
+        if t and (os.time() - t) <= 3 then
+            local rtype, rregion = resolve(refreshtype, refreshregion)
+            if rtype == "ui" or rtype == nil then
+                local k = keyOf(widget, rtype, rregion)
+                local now = os.clock()
+                if recent[k] and (now - recent[k]) < 0.6 then
+                    return -- already requested a moment ago; nothing new to paint
+                end
+                recent[k] = now
+            end
+        end
+        return orig_set(self, widget, refreshtype, refreshregion, ...)
+    end
+end
+
 local function apply_fm()
     installTitleFaceHook()
     installFMToolbarPatch()
@@ -424,6 +655,8 @@ local function apply_fm()
             pcall(installMosaicMarginHook)
             pcall(installPagerSizePatch)
             pcall(installPagerTextPatch)
+            pcall(installNavpagerHoldPatch)
+            pcall(installDirtyCoalesce)
             pcall(function()
                 local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
                 local fm = ok_f and FM.instance
@@ -590,12 +823,14 @@ layoutFMToolbar = function(fm_self)
         table.sort(lefts, by_x)
         table.sort(rights, by_x)
 
+        local toolbar_touch = Screen:scaleBySize(TitleMetrics.TOUCH)
         for i, w in ipairs(lefts) do
             shrinkFMButton(w, box, glyph)
             w.overlap_align = nil
             w._wr_x = side + (i - 1) * (box + gap)
             w._wr_y = y
             forcePaintAt(w, tb)
+            widenTouchRange(w, toolbar_touch)
         end
         local total = #rights * box + math.max(0, #rights - 1) * gap
         local rx0   = math.max(side, sw - side - total)
@@ -605,11 +840,49 @@ layoutFMToolbar = function(fm_self)
             w._wr_x = rx0 + (i - 1) * (box + gap)
             w._wr_y = y
             forcePaintAt(w, tb)
+            widenTouchRange(w, toolbar_touch)
         end
 
         -- subtitle (folder path) shares the toolbar row, vertically centred
         local sub = tb.subtitle_widget
         if sub then
+            -- SimpleUI writes its verbose localised page template into the
+            -- subtitle ("Page X of Y"). Rebuild the page part as 第p/pn页 next
+            -- to the folder path — no locale text is parsed, the numbers come
+            -- from the file chooser; a single page shows no page info at all
+            -- (SimpleUI already omits it there).
+            if not sub._wr_subtitle_hooked and type(sub.setText) == "function" then
+                sub._wr_subtitle_hooked = true
+                local orig_set_text = sub.setText
+                sub.setText = function(w, text, ...)
+                    local fc = fm_self.file_chooser
+                    local p  = fc and fc.page
+                    local pn = fc and fc.page_num
+                    -- Only rewrite calls that really carry the page template
+                    -- ("第 1 页，共 2 页" / "Page 1 of 2"): SimpleUI also sets
+                    -- the plain path on its own, and rewriting that would drop
+                    -- the path and make the next call compose a duplicate.
+                    if type(text) == "string" and p and pn and pn > 1 then
+                        -- Robust rule: no assumption about the spaces in the
+                        -- localised template. A page fragment is identified by
+                        -- "页" + "共" (zh) or "Page N of M" (en) plus two
+                        -- number groups; SimpleUI also sets the bare path, and
+                        -- rewriting that would drop the path.
+                        local nums = {}
+                        for n in text:gmatch("(%d+)") do nums[#nums + 1] = n end
+                        local is_page = (#nums >= 2)
+                            and ((text:find("页") and text:find("共"))
+                                or text:match("Page%s*%d+%s*of%s*%d+"))
+                        if is_page then
+                            local head = text:match("^(.*)  ·  ")
+                            text = (head and head ~= "")
+                                and (head .. "  ·  第" .. p .. "/" .. pn .. "页")
+                                or ("第" .. p .. "/" .. pn .. "页")
+                        end
+                    end
+                    return orig_set_text(w, text, ...)
+                end
+            end
             local sub_h = 0
             pcall(function() sub_h = sub:getSize().h or 0 end)
             local left_w  = #lefts * box + math.max(0, #lefts - 1) * gap
@@ -633,6 +906,18 @@ layoutFMToolbar = function(fm_self)
             sub._wr_y = sub_y
             forcePaintAt(sub, tb)
         end
+
+        -- Reserve the toolbar row / recalc / repaint only when the geometry
+        -- actually changed: SimpleUI's apply() runs several times per
+        -- navigation and each run used to dirty this same title-bar strip
+        -- again, which shows up as a flash on e-ink.
+        local sig = table.concat({
+            tostring(title_h), tostring(sep_y), tostring(y),
+            tostring(box), tostring(side), tostring(gap), tostring(#widgets),
+        }, ":")
+        local unchanged = (fm_self._wr_tb_sig == sig)
+        fm_self._wr_tb_sig = sig
+        if unchanged then return end
 
         -- reserve the toolbar row inside the TitleBar so content moves down
         local target_h = y + box + Screen:scaleBySize(3)

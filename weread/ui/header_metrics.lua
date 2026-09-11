@@ -29,6 +29,12 @@ local M = {
     LINE_INSET = 24,   -- separator: inset on both sides (== cover grid / dock)
     LINE_H     = 1,    -- separator: thickness
     LINE_GRAY  = 0.72, -- separator: Blitbuffer.gray() level
+
+    -- Tap range for the FM icon buttons (toolbar row + pager chevrons):
+    -- the weread pager's own touch size — its footprint (18 + 2*2) grown by
+    -- 2*13 on each side. Layout footprint, icon size and spacing stay as they
+    -- are; only "what counts as a tap" grows.
+    TOUCH = 48,
 }
 
 return M

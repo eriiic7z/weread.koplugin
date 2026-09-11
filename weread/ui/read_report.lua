@@ -203,7 +203,10 @@ end
 -- period navigation). host_close is closed right before the (re)shown page
 -- when opening hosted from below (shelf dock).
 function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
-    self:showBusy(_("Loading reading statistics..."))
+    -- Delayed: cached loads finish well under this, so the banner only appears
+    -- for a genuinely slow fetch (1.5s ≈ above the fast path, below the point
+    -- where users start doubting the tap and press again).
+    self:showBusyDelayed(1.5, _("Loading reading statistics..."))
     self:runOnlineTask(_("Reading statistics"), function()
         local ok, data = pcall(function()
             return ReadStats.fetch(self.client, mode, base_time)
@@ -232,6 +235,11 @@ function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
             end,
             on_switch = function(new_mode)
                 self:loadReadStats(new_mode, nil, view, host_mode)
+            end,
+            -- navpager: long-press on the dock's right arrow jumps back to the
+            -- newest period (base_time = nil); one reload, no stepping.
+            on_latest = function()
+                self:loadReadStats(mode, nil, view, host_mode)
             end,
             on_bookshelf = function()
                 -- hosted stats: the shelf's dock "WeRead" item goes back to

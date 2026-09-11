@@ -32,6 +32,12 @@ local T = require("ffi/util").template
 
 local function tr(text) return I18n.tr(text) end
 
+--- Navpager mode: true when SimpleUI's bottom bar is in navpager mode.
+local function navpagerOn()
+    local ok, cfg = pcall(require, "infra/sui_config")
+    return ok and cfg and cfg.isNavpagerEnabled and cfg.isNavpagerEnabled() or false
+end
+
 local CachedCorner = Widget:extend{
     size = 0,
 }
@@ -470,13 +476,44 @@ function LibraryView:toolRow()
         HorizontalSpan:new{ width = gap_w },
         actions,
     }
-    return FrameContainer:new{
+    -- Navpager indicator, centred over the row: same visual slot as FM's
+    -- path/page subtitle (the line under the separator). Empty until we know
+    -- the page count (see refreshToolPageInfo). The indicator is centred on
+    -- the SCREEN, so it lives in a screen-wide layer on top of the row (the
+    -- row itself keeps its own side padding).
+    local info = TextWidget:new{ text = "", face = Font:getFace("cfont", 16) }
+    self._tool_page_info = info
+    local row_fc = FrameContainer:new{
         bordersize = 0, padding = 0, margin = 0,
         width = self.screen_w,
         height = h,
         padding_left = side_m,
         row,
     }
+    return OverlapGroup:new{
+        dimen = Geom:new{ w = self.screen_w, h = h },
+        row_fc,
+        CenterContainer:new{
+            dimen = Geom:new{ w = self.screen_w, h = h },
+            info,
+        },
+    }
+end
+
+--- Text of the centred navpager indicator: "第p/pn页" only while SimpleUI's
+--- navpager owns paging and there is more than one page.
+function LibraryView:refreshToolPageInfo()
+    local w = self._tool_page_info
+    if not w then return end
+    local text = ""
+    if navpagerOn() and self.paged then
+        local total = math.max(1, self.page_count or 1)
+        if total > 1 then
+            local cur = math.max(1, math.min(self.page or 1, total))
+            text = T(tr("第%1/%2页"), cur, total)
+        end
+    end
+    pcall(function() w:setText(text) end)
 end
 
 function LibraryView:actionBar()
@@ -561,6 +598,7 @@ function LibraryView:preparePagination()
             math.min(math.floor(tonumber(self.page) or 1), self.page_count)
         )
     end
+    self:refreshToolPageInfo()
 end
 
 function LibraryView:content()
@@ -739,6 +777,36 @@ function LibraryView:koPager()
     }
 end
 
+--- Navpager hooks (SimpleUI's bottom-bar mode): the dock-end arrows on our
+--- mirrored bar flip this view's pages, exactly like the in-page pager does.
+--- Existing pager code is untouched — both ways coexist.
+function LibraryView:navpagerState()
+    if not self.paged then return false, false end
+    local total = math.max(1, self.page_count or 1)
+    local cur = math.max(1, math.min(self.page or 1, total))
+    return cur > 1, cur < total
+end
+
+function LibraryView:navpagerGo(dir)
+    if not self.paged then return end
+    local total = math.max(1, self.page_count or 1)
+    local cur = math.max(1, math.min(self.page or 1, total))
+    local target = cur
+    if dir == "prev" then
+        target = cur - 1
+    elseif dir == "next" then
+        target = cur + 1
+    elseif dir == "first" then
+        target = 1
+    elseif dir == "last" then
+        target = total
+    end
+    target = math.max(1, math.min(total, target))
+    if target ~= cur and self.on_page_changed then
+        self.on_page_changed(target)
+    end
+end
+
 --- Legacy alias kept for the method-inventory check; the shelf pager above
 --- now serves both bookshelf and public-account pages.
 function LibraryView:pubPageBar()
@@ -824,7 +892,12 @@ function LibraryView:init()
         HorizontalSpan:new{ width = self.cover_side_margin },
     }
     self:preparePagination()
-    local page_bar = self:pageBar()
+    -- Navpager mode hands page turning to the dock-end arrows, so the in-page
+    -- pager row is hidden while it is on (the pager code itself is unchanged).
+    local page_bar
+    if not navpagerOn() then
+        page_bar = self:pageBar()
+    end
     self.top_gap = top_gap
     self.bottom_gap = bottom_gap
     local dock = self:bottomDock(bottom_gap)
@@ -853,7 +926,10 @@ function LibraryView:init()
         if fit ~= self.page_size then
             self.page_size = fit
             self:preparePagination()
-            page_bar = self:pageBar()
+            -- same navpager rule as above: the dock arrows own paging there
+            if not navpagerOn() then
+                page_bar = self:pageBar()
+            end
             scroll_h = math.max(1, self.screen_h - top_gap - dock_h
                 - self.title_bar:getHeight() - title_sep:getSize().h
                 - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
@@ -951,10 +1027,6 @@ function LibraryView:onShow()
     self:registerHostGestures()
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
-end
-
-function LibraryView:onCloseWidget()
-    UIManager:setDirty(nil, function() return "ui", self.dimen end)
 end
 
 function LibraryView:onClose()
