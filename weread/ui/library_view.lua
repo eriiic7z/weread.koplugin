@@ -28,6 +28,7 @@ local TitleMetrics = require("weread.ui.header_metrics")
 local FullscreenHost = require("weread.ui.fullscreen_host")
 local FocusNav = require("weread.ui.focus_nav")
 local I18n = require("weread.lib.i18n")
+local logger = require("weread.lib.logger")
 local T = require("ffi/util").template
 
 local function tr(text) return I18n.tr(text) end
@@ -461,11 +462,11 @@ end
 function LibraryView:toolRow()
     local tab_group = self:tabBar()
     local actions = self:actionBar()
-    local th = math.max(1, tab_group:getSize().h)
-    local ah = math.max(1, actions:getSize().h)
     local tw = math.max(1, tab_group:getSize().w)
     local aw = math.max(1, actions:getSize().w)
-    local h = math.max(th, ah)
+    -- Kept as the natural content height (plan C: only the header TOP is
+    -- unified across the three pages, rows keep their own height).
+    local h = math.max(tab_group:getSize().h, actions:getSize().h)
     -- tab group inset by the dock separator's own side margin, so the tabs
     -- align with the cover grid and the bottom dock divider
     local side_m = Screen:scaleBySize(24)
@@ -593,6 +594,9 @@ function LibraryView:preparePagination()
     end
     if self.paged then
         self.page_count = math.max(1, math.ceil(#source / self.page_size))
+        -- SimpleUI's pageable contract: the native navpager arrows resolve their
+        -- target through page/page_num on the topmost pageable widget.
+        self.page_num = self.page_count
         self.page = math.max(
             1,
             math.min(math.floor(tonumber(self.page) or 1), self.page_count)
@@ -769,44 +773,65 @@ function LibraryView:koPager()
     }
     self._page_buttons = { first, left, right, last, page_text }
     local function sp() return HorizontalSpan:new{ width = gap } end
-    return CenterContainer:new{
-        dimen = Geom:new{ w = self.screen_w, h = math.max(1, icon_sz) },
+    -- Copy the FileManager pager row's height (measured live) so the three rows
+    -- are identical by construction; shared metric only as a fallback.
+    local row_h = self:fmPagerRowHeight()
+        or Screen:scaleBySize(TitleMetrics.PAGER_ROW_H)
+    local row = CenterContainer:new{
+        dimen = Geom:new{ w = self.screen_w, h = row_h },
         HorizontalGroup:new{
             first, sp(), left, sp(), page_text, sp(), right, sp(), last,
         },
     }
+    return row
 end
 
---- Navpager hooks (SimpleUI's bottom-bar mode): the dock-end arrows on our
---- mirrored bar flip this view's pages, exactly like the in-page pager does.
---- Existing pager code is untouched — both ways coexist.
-function LibraryView:navpagerState()
-    if not self.paged then return false, false end
-    local total = math.max(1, self.page_count or 1)
-    local cur = math.max(1, math.min(self.page or 1, total))
-    return cur > 1, cur < total
-end
+--- Navpager is provided by SimpleUI's Bar Injection (is_pageable = true); it
+--- drives onPrevPage/onNextPage/onGotoPage, defined in init.
 
-function LibraryView:navpagerGo(dir)
-    if not self.paged then return end
-    local total = math.max(1, self.page_count or 1)
-    local cur = math.max(1, math.min(self.page or 1, total))
-    local target = cur
-    if dir == "prev" then
-        target = cur - 1
-    elseif dir == "next" then
-        target = cur + 1
-    elseif dir == "first" then
-        target = 1
-    elseif dir == "last" then
-        target = total
+--- Family-internal switch (kept from before the native migration): the dock
+--- tap for the stats tab opens the stats page over this one and closes this one
+--- once its data is ready — instead of going through SimpleUI's navigate, which
+--- left the stats page under this one and looked like a dead tap.
+function LibraryView:openStats()
+    if self.on_stats then
+        self.on_stats(self)
+        return true
     end
-    target = math.max(1, math.min(total, target))
-    if target ~= cur and self.on_page_changed then
-        self.on_page_changed(target)
-    end
+    return false
 end
 
+--- Called by the touch-zone wrapper right after SimpleUI installed this page's
+--- bar zones (they do not exist at on_inject time). Take over just the stats
+--- tab's tap semantics so the family switch is the same as before the
+--- migration instead of SimpleUI's navigate (which left the stats page under
+--- this one and looked like a dead tap).
+function LibraryView:on_zones_registered()
+    if self.native_bar ~= true then return end
+    local stats_id = self:findDockTab(function(_, _, cfg)
+        return cfg ~= nil and cfg.dispatcher_action == "weread_reading_statistics"
+    end)
+    if not stats_id then
+        logger.info("wrZoneTab: shelf found NO stats tab in the dock list")
+        return
+    end
+    local index = self:renderedTabIndex(nil, stats_id)
+    logger.info("wrZoneTab: shelf stats tab=" .. tostring(stats_id)
+        .. " index=" .. tostring(index))
+    if not index then return end
+    self:overrideDockTab(index, function()
+        logger.info("wrFlow: tap stats tab -> openStats")
+        -- Never let an error inside the tap path escape: an unhandled Lua error
+        -- in a touch-zone handler breaks KOReader's input chain (the UI then
+        -- looks frozen).
+        local ok, err = pcall(function() return self:openStats() end)
+        if not ok then
+            logger.err("wrFlow: openStats failed:", tostring(err))
+            return true -- consume the tap anyway
+        end
+        return true
+    end)
+end
 --- Legacy alias kept for the method-inventory check; the shelf pager above
 --- now serves both bookshelf and public-account pages.
 function LibraryView:pubPageBar()
@@ -814,46 +839,20 @@ function LibraryView:pubPageBar()
 end
 
 function LibraryView:init()
-    -- Reusable full-screen host: SimpleUI reserved bands + dock (tabs/icons
-    -- from SimpleUI's own registry) + frontlight edge gestures + top-edge
-    -- native menu gestures. The dock entry that points at this plugin gets
-    -- the active indicator and its label.
-    FullscreenHost.install(self, {
-        -- this dock's "bookshelf" item = the SimpleUI QA pointing at the
-        -- weread plugin (launch); it gets the active indicator
-        dock_highlight = function(_, _, cfg)
-            return cfg ~= nil and cfg.plugin_key == "weread"
-                and cfg.plugin_method == "launch"
-        end,
-        -- family-internal navigation: WeRead-launch item = current page
-        -- (no-op); the reading-statistics dispatcher item switches to the
-        -- stats page without leaving the host or going through SimpleUI
-        dock_nav = function(view, _, cfg)
-            if cfg and cfg.plugin_key == "weread" then
-                return true
-            end
-            if cfg and cfg.dispatcher_action == "weread_reading_statistics" then
-                -- family switch: open the stats page hosted; the shelf view
-                -- is passed along and closed by the stats loader only once
-                -- its data is ready (no FM/home flash in between)
-                if view.on_stats then view.on_stats(view) end
-                return true
-            end
-            return false
-        end,
-    })
+    -- SimpleUI hosts this page through its Bar Injection API: real top/bottom
+    -- bars with every setting applied, its own top-edge menu gestures, bar
+    -- taps, highlight and close handling. We only keep the frontlight gestures.
+    FullscreenHost.install(self)
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
-    local top_gap, bottom_gap = self:reservedBands()
-    -- pull the whole header block up: reserve 10px less of the top band
-    -- (scroll area grows by the same amount, so the dock/bottom band stay flush)
-    top_gap = math.max(0, top_gap - Screen:scaleBySize(10))
-    -- Full-screen viewport; the top/bottom bands below are left transparent
-    -- (spacers), so the SimpleUI top status bar and bottom nav bar of the
-    -- FileManager underneath stay visible. The white panel only wraps the
-    -- actual content, which is inset by the reserved bands.
-    self.dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.screen_h }
-    self.covers_fullscreen = false
+    self.native_bar = FullscreenHost.nativeBarAvailable()
+    local top_gap, bottom_gap = 0, 0
+    if self.native_bar then
+        self:ensureBarDescriptors()
+        -- BarInjection matches shown widgets by name.
+        self.name = "weread_shelf"
+    end
+    self.covers_fullscreen = true
     self.outer_margin = 0
     self.content_width = self.screen_w
     self.list_width = self.screen_w - 3 * Screen:scaleBySize(6)
@@ -892,19 +891,30 @@ function LibraryView:init()
         HorizontalSpan:new{ width = self.cover_side_margin },
     }
     self:preparePagination()
-    -- Navpager mode hands page turning to the dock-end arrows, so the in-page
-    -- pager row is hidden while it is on (the pager code itself is unchanged).
+    -- Navpager mode hands page turning to the native dock arrows (pre-migration
+    -- behaviour), so the in-page pager row is hidden while it is on.
     local page_bar
     if not navpagerOn() then
         page_bar = self:pageBar()
     end
+    -- Native bar: SimpleUI's wrapper already holds the top/bottom bars, so we
+    -- lay our content out on the content height it provides.
+    local layout_h = self.screen_h
+    if self.native_bar then
+        local ok_core, UI = pcall(require, "infra/sui_core")
+        if ok_core and UI and UI.getContentHeight then
+            local ok_h, h = pcall(UI.getContentHeight)
+            if ok_h and type(h) == "number" and h > 0 then layout_h = h end
+        end
+    end
+    self.layout_h = layout_h
     self.top_gap = top_gap
     self.bottom_gap = bottom_gap
-    local dock = self:bottomDock(bottom_gap)
-    local dock_h = dock and bottom_gap or 0
-    -- pager sits G px above the dock separator (tuned visually: shelf gap + 1px)
-    local pager_gap = Screen:scaleBySize(8)
-    local scroll_h = math.max(1, self.screen_h - top_gap - dock_h
+    -- The 8px gap below the pager existed only to clear the self-drawn dock;
+    -- with the native bar there is nothing to clear, so drop it (the FM footer
+    -- has no such gap either).
+    local pager_gap = self.native_bar and 0 or Screen:scaleBySize(8)
+    local scroll_h = math.max(1, layout_h
         - self.title_bar:getHeight() - title_sep:getSize().h
         - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
     -- Public-account list: auto-fit the rows per page to the viewport, so no
@@ -926,11 +936,11 @@ function LibraryView:init()
         if fit ~= self.page_size then
             self.page_size = fit
             self:preparePagination()
-            -- same navpager rule as above: the dock arrows own paging there
+            -- same navpager rule: the native dock arrows own paging there
             if not navpagerOn() then
                 page_bar = self:pageBar()
             end
-            scroll_h = math.max(1, self.screen_h - top_gap - dock_h
+            scroll_h = math.max(1, layout_h
                 - self.title_bar:getHeight() - title_sep:getSize().h
                 - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
         end
@@ -982,40 +992,39 @@ function LibraryView:init()
     end
     FocusNav.apply(self, rows, { scroll = scroll, outside_scroll = outside_scroll })
     FocusNav.initialFocus(self, 1, 1)
-    self[1] = FrameContainer:new{
+    local panel = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
         bordersize = 0, padding = 0, margin = 0,
-        dimen = self.dimen:copy(),
+        width = self.screen_w,
         VerticalGroup:new{
-            align = "left",
-            VerticalSpan:new{ width = top_gap },
-            FrameContainer:new{
-                background = Blitbuffer.COLOR_WHITE,
-                bordersize = 0, padding = 0, margin = 0,
-                width = self.screen_w,
-                VerticalGroup:new{
-                    align = "left", self.title_bar, title_sep, tool, scroll,
-                    page_bar or VerticalSpan:new{ width = 0 },
-                    VerticalSpan:new{ width = pager_gap },
-                },
-            },
-            VerticalSpan:new{ width = bottom_gap - dock_h },
-            dock or VerticalSpan:new{ width = 0 },
+            align = "left", self.title_bar, title_sep, tool, scroll,
+            page_bar or VerticalSpan:new{ width = 0 },
+            VerticalSpan:new{ width = pager_gap },
         },
     }
-    if self.paged and Device:hasKeys() then
-        self.onNextPage = function(view)
-            if view.page < view.page_count and view.on_page_changed then
-                view.on_page_changed(view.page + 1)
-            end
-            return true
+    self[1] = FrameContainer:new{
+        bordersize = 0, padding = 0, margin = 0,
+        dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h },
+        panel,
+    }
+    -- Paging interface: the in-page pager and SimpleUI's navpager arrows both
+    -- drive this (SimpleUI looks for page_num + onPrevPage/onNextPage/
+    -- onGotoPage on the pageable widget).
+    local function jumpToPage(p)
+        local total = math.max(1, self.page_count or 1)
+        p = math.max(1, math.min(total, math.floor(tonumber(p) or 1)))
+        if p ~= self.page and self.on_page_changed then
+            self.on_page_changed(p)
         end
-        self.onPrevPage = function(view)
-            if view.page > 1 and view.on_page_changed then
-                view.on_page_changed(view.page - 1)
-            end
-            return true
-        end
+        return true
     end
+    if not self.onPrevPage then
+        self.onPrevPage = function() return jumpToPage((self.page or 1) - 1) end
+    end
+    if not self.onNextPage then
+        self.onNextPage = function() return jumpToPage((self.page or 1) + 1) end
+    end
+    self.onGotoPage = function(_, p) return jumpToPage(p) end
 end
 
 -- Frontlight edge gestures mirroring KOReader: one-finger vertical swipe
@@ -1023,13 +1032,18 @@ end
 -- frontlight with the same delta curve and on/off boundary as
 -- DeviceListener (calculateGestureDelta).
 function LibraryView:onShow()
-    -- Host gestures: top-edge native menu + frontlight swipes
-    self:registerHostGestures()
+    logger.info("wrFlow: shelf onShow mode=" .. tostring(self.mode)
+        .. " page=" .. tostring(self.page) .. "/" .. tostring(self.page_num))
+    -- Host gestures: frontlight edge swipes; the top-edge native menu is
+    -- registered by SimpleUI itself for injected widgets, so only the fallback
+    -- (non-native) path needs our own top zones.
+    self:registerHostGestures(self.native_bar == true)
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
 end
 
 function LibraryView:onClose()
+    logger.info("wrFlow: shelf onClose")
     UIManager:close(self)
     return true
 end

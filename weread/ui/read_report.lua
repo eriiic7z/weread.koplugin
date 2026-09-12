@@ -193,8 +193,40 @@ function M:showReadStats(host_mode, host_close)
         local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
         host_mode = not (ok_r and ReaderUI.instance)
     end
+    -- Family switch: when the stats page is opened from the bookshelf (its dock
+    -- tab is a SimpleUI QA, so SimpleUI does not close our page for us), hand
+    -- the shelf over as host_close — it is closed only once the stats data is
+    -- ready, exactly like the in-place switch used to do. Without this the
+    -- stats page opens under the still-open shelf and looks like a dead tap.
+    if host_close == nil then
+        pcall(function()
+            local ok_ui, UIManager = pcall(require, "ui/uimanager")
+            local stack = ok_ui and UIManager
+                and (UIManager._window_stack or UIManager.window_stack)
+            for i = #stack, 1, -1 do
+                local w = stack[i] and stack[i].widget
+                if w and w.name == "weread_shelf" then
+                    host_close = w
+                    break
+                end
+            end
+        end)
+    end
     -- Open on the monthly tab by default. host_close (the shelf view opened
     -- from) is dropped only once the stats data is ready, so no FM flash.
+    pcall(function()
+        local ok_ui, UIMgr = pcall(require, "ui/uimanager")
+        local stack = ok_ui and UIMgr and (UIMgr._window_stack or UIMgr.window_stack)
+        local top = {}
+        for i = #(stack or {}), 1, -1 do
+            local w = stack[i] and stack[i].widget
+            top[#top + 1] = (w and (w.name or w.id or "?")) or "nil"
+            if #top >= 3 then break end
+        end
+        logger.info("wrFlow: showReadStats host_mode=" .. tostring(host_mode)
+            .. " host_close=" .. tostring(host_close ~= nil)
+            .. " top=" .. table.concat(top, ">"))
+    end)
     self:loadReadStats("monthly", nil, nil, host_mode, host_close)
 end
 
@@ -203,6 +235,10 @@ end
 -- period navigation). host_close is closed right before the (re)shown page
 -- when opening hosted from below (shelf dock).
 function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
+    logger.info("wrFlow: load mode=" .. tostring(mode)
+        .. " host_mode=" .. tostring(host_mode)
+        .. " old_view=" .. tostring(old_view ~= nil)
+        .. " host_close=" .. tostring(host_close ~= nil))
     -- Delayed: cached loads finish well under this, so the banner only appears
     -- for a genuinely slow fetch (1.5s ≈ above the fast path, below the point
     -- where users start doubting the tap and press again).
@@ -217,13 +253,7 @@ function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
             self:showInfo(T(_("%1 failed:\n%2"), _("Reading statistics"), display_error(data)))
             return
         end
-        if old_view then
-            UIManager:close(old_view)
-        end
-        -- hosted-from-shelf: close the shelf only now, right before showing
-        if host_close then
-            pcall(function() UIManager:close(host_close) end)
-        end
+        logger.info("wrFlow: fetched, showing")
         local view
         view = ReadStatsView.show(data, {
             host_mode = host_mode,
@@ -242,12 +272,54 @@ function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
                 self:loadReadStats(mode, nil, view, host_mode)
             end,
             on_bookshelf = function()
-                -- hosted stats: the shelf's dock "WeRead" item goes back to
-                -- the bookshelf; reopen it through the plugin
-                if view and view.onClose then pcall(function() view:onClose() end) end
+                -- Show the shelf first, then close this page: UIManager:close
+                -- repaints what it uncovers, so closing first painted the whole
+                -- FileManager just to cover it again (the visible flash). The
+                -- close itself is deferred one tick: this runs inside this page's
+                -- own tap callback, and closing a widget mid-gesture can leave
+                -- KOReader's input chain stuck (later taps do nothing).
+                local closing = view
                 self:showBookshelf()
+                UIManager:scheduleIn(0, function()
+                    pcall(function()
+                        if closing and closing.closeForNavigation then
+                            closing:closeForNavigation()
+                        elseif closing and closing.onClose then
+                            closing:onClose()
+                        end
+                    end)
+                end)
             end,
         })
+        -- Close the previous page AFTER the new one is on top, and via
+        -- closeForNavigation when available: a plain UIManager:close makes
+        -- SimpleUI rebuild/repaint the FileManager under us (its "restore the FM
+        -- tab" wrapper), which is a full-screen repaint the user sees as a flash.
+        -- Deferred one tick too: a cached fetch can complete inside the tap that
+        -- triggered it, and closing a widget mid-gesture can stick the input
+        -- chain.
+        if old_view then
+            UIManager:scheduleIn(0, function()
+                pcall(function()
+                    if old_view.closeForNavigation then
+                        old_view:closeForNavigation()
+                    else
+                        UIManager:close(old_view)
+                    end
+                end)
+            end)
+        end
+        if host_close then
+            -- Flag it as part of this navigation so SimpleUI skips its
+            -- "restore the FM tab" rebuild (same flag its own navigate sets).
+            pcall(function()
+                if host_close.closeForNavigation then
+                    host_close:closeForNavigation()
+                else
+                    UIManager:close(host_close)
+                end
+            end)
+        end
     end)
 end
 

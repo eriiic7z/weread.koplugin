@@ -1,53 +1,27 @@
--- FullscreenHost — reusable infrastructure for full-screen overlay views.
+-- FullscreenHost — SimpleUI integration for the WeRead full-screen pages.
 --
--- Any view that covers the FileManager full-screen (like the WeRead
--- bookshelf) gets the same four facilities SimpleUI's own screens have,
--- without re-implementing them per view:
---   1. Reserved bands: the SimpleUI top status bar / bottom nav bar stay
---      visible above and below the overlay (transparent spacers).
---   2. Bottom dock: mirrors the user's SimpleUI bar (simpleui_bar_tabs) with
---      SimpleUI's own icons/labels (QA.getEntry), forwards taps back to
---      SimpleUI (navigation / custom-QA actions), and highlights the entry
---      that represents this view.
---   3. Frontlight edge gestures: left-edge swipe + two-finger swipe adjust
---      the frontlight (KOReader-consistent delta), with native feedback.
---   4. Top-edge menu gestures: tapping/swiping down from the top opens the
---      native FileManager TouchMenu (zone geometry mirrors KOReader).
+-- The bookshelf and the reading-statistics page are hosted by SimpleUI itself
+-- through its Bar Injection API (infra/sui_core.lua → M.BarInjection):
+--   * SimpleUI draws the real top status bar and bottom navigation bar, so every
+--     bar setting (icon size / label size / icons-text-both / colours / style /
+--     transparency / navpager) applies to these pages automatically;
+--   * it registers the bottom-bar touch zones, the top-edge tap/swipe zones that
+--     open the native FileManager TouchMenu, gesture priority, the active-tab
+--     highlight and the close handling.
 --
--- Usage (from any plugin):
---   local Host = require("<path>.fullscreen_host")
---   -- build your view, then in its init (or before show):
---   Host.install(self, {
---       dock_self_plugin = "yourplugin",  -- dock entry that is "this page"
---       dock_self_label = "我的界面",      -- label for that entry
---   })
---   -- install() provides: self:dockTabs(), self:dockIconFor(id),
---   -- self:dockLabel(id), self:bottomDock(height), self:onDockTap(id),
---   -- self:showPowerDialog(), self:registerHostGestures(), plus
---   -- self:reservedBands() (top, bottom). Your init then lays out
---   -- content between the bands and adds the dock, exactly like the
---   -- WeRead bookshelf does.
+-- What is left here is only what SimpleUI does not provide:
+--   1. The descriptor helpers used to register our pages with its API.
+--   2. Frontlight swipe gestures (left edge / two fingers). KOReader implements
+--      these as widget-level zones on the FileManager, and SimpleUI does not
+--      register them for injected pages — but our page covers the FileManager.
 --
--- NOTE: depends on SimpleUI's settings layout and its QA registry being
--- loaded (QA icons resolve via require cache / SimpleUI active on FM).
+-- Usage: FullscreenHost.install(view, opts) from the view's init, then
+--   view:ensureBarDescriptors() and (in onShow) view:registerHostGestures().
 
-local Blitbuffer = require("ffi/blitbuffer")
-local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
-local Font = require("ui/font")
-local FrameContainer = require("ui/widget/container/framecontainer")
-local Geom = require("ui/geometry")
-local GestureRange = require("ui/gesturerange")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
-local ImageWidget = require("ui/widget/imagewidget")
-local InputContainer = require("ui/widget/container/inputcontainer")
-local LineWidget = require("ui/widget/linewidget")
-local OverlapGroup = require("ui/widget/overlapgroup")
 local Screen = Device.screen
-local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
-local VerticalGroup = require("ui/widget/verticalgroup")
-local VerticalSpan = require("ui/widget/verticalspan")
+local logger = require("weread.lib.logger")
 
 local Host = {}
 
@@ -62,49 +36,8 @@ local function sui_store()
     return LuaSettings:open(path)
 end
 
---- Navpager (SimpleUI's bottom-bar mode): arrows at both ends of the bar.
--- Resolved through SimpleUI itself so the arrows match its geometry/icons;
--- when the modules are unavailable we simply behave as "off".
-local function sui_config()
-    local ok, m = pcall(require, "infra/sui_config")
-    return ok and m or nil
-end
-
-local function navpagerEnabled()
-    local cfg = sui_config()
-    if not (cfg and cfg.isNavpagerEnabled) then return false end
-    local ok, on = pcall(cfg.isNavpagerEnabled)
-    return ok and on == true
-end
-
---- Arrow icon file for the navpager cells (SimpleUI's own default, honouring
--- the user's per-slot icon override when present).
-local function navpagerIcon(is_prev)
-    local cfg = sui_config()
-    local file = cfg and cfg.ICON
-        and (is_prev and cfg.ICON.nav_prev or cfg.ICON.nav_next) or nil
-    local ok, style = pcall(require, "features/sui_style")
-    if ok and style and style.getIcon then
-        local override = style.getIcon(is_prev and "sui_navpager_prev" or "sui_navpager_next")
-        if override then file = override end
-    end
-    return file
-end
-
---- State/action hooks the hosting view may provide:
---   view:navpagerState()        -> has_prev, has_next
---   view:navpagerGo("prev"|"next")
--- Without them the arrows stay dimmed and inert.
-function Host:navpagerArrowState()
-    if type(self.navpagerState) == "function" then
-        local ok, prev, nxt = pcall(function() return self:navpagerState() end)
-        if ok then return prev == true, nxt == true end
-    end
-    return false, false
-end
-
---- Raw per-item SimpleUI config for a dock tab (custom QAs), nil for
---- built-in ids.
+--- Raw per-item SimpleUI config for a dock tab (custom QAs), nil for built-in
+--- ids.
 function Host:dockConfig(id)
     if not (id and id:match("^custom_qa_")) then return nil end
     local store = sui_store()
@@ -112,65 +45,18 @@ function Host:dockConfig(id)
     return store:readSetting("simpleui_qa_" .. id)
 end
 
---- Reserved top (status bar) / bottom (nav bar) heights, in pixels.
---- Prefer SimpleUI's own API (single source of truth); fall back to the
---- locally mirrored formulas if the modules are unreachable/older.
-function Host.reservedBands()
-    local ok_ds, DataStorage = pcall(require, "datastorage")
-    if not ok_ds then return 0, 0 end
-    local path = DataStorage:getSettingsDir() .. "/simpleui/sui_settings.lua"
-    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-    if not ok_lfs or lfs.attributes(path, "mode") ~= "file" then return 0, 0 end
-    local ok_ls, LuaSettings = pcall(require, "luasettings")
-    if not ok_ls then return 0, 0 end
-    local store = LuaSettings:open(path)
-    local function sui_pct(key, def, lo, hi)
-        local v = store and tonumber(store:readSetting(key))
-        if not v then return def end
-        return math.max(lo, math.min(hi, v))
-    end
-    local top_enabled = store and store:readSetting("simpleui_topbar_enabled", true) ~= false
-    local bar_enabled = store and store:readSetting("simpleui_bar_enabled", true) ~= false
-
-    local top = 0
-    if top_enabled then
-        -- SimpleUI's own top-bar height API TOTAL_TOP_H
-        -- SimpleUI's own top-bar height API TOTAL_TOP_H, lazy; module may be
-        -- absent/older)
-        local ok_tb, Topbar = pcall(require, "screens/sui_topbar")
-        if ok_tb and Topbar and type(Topbar.TOTAL_TOP_H) == "function" then
-            local ok_h, h = pcall(Topbar.TOTAL_TOP_H)
-            if ok_h and type(h) == "number" and h > 0 then top = h end
-        end
-        if top == 0 then -- fallback: locally mirrored formula
-            local s = sui_pct("simpleui_topbar_size_pct", 100, 50, 150) / 100
-            top = math.floor(22 * s)
-                + math.floor(Screen:scaleBySize(20) * s)
-                + math.floor(Screen:scaleBySize(8) * s)
-        end
-    end
-    local bar = 0
-    if bar_enabled then
-        -- SimpleUI's own nav-bar height API TOTAL_H
-        -- SimpleUI's own nav-bar height API TOTAL_H, lazy
-        local ok_bb, Bottombar = pcall(require, "screens/sui_bottombar")
-        if ok_bb and Bottombar and type(Bottombar.TOTAL_H) == "function" then
-            local ok_h, h = pcall(Bottombar.TOTAL_H)
-            if ok_h and type(h) == "number" and h > 0 then bar = h end
-        end
-        if bar == 0 then -- fallback: locally mirrored formula
-            local s = sui_pct("simpleui_bar_size_pct", 100, 50, 150) / 100
-            local b = sui_pct("simpleui_bar_bottom_margin_pct", 100, 0, 300) / 100
-            bar = math.floor(Screen:scaleBySize(96) * s)
-                + Screen:scaleBySize(2)
-                + math.floor(Screen:scaleBySize(12) * b)
-        end
-    end
-    return top, bar
-end
-
---- The list of SimpleUI dock tab ids (raw order), nil when bar disabled.
+--- The list of SimpleUI dock tab ids in the order its bar renders them.
+--- MUST come from SimpleUI's own resolver (infra/sui_config.loadTabConfig): it
+--- drops ids it does not recognise, and its touch zones (`navbar_pos_1..n`) are
+--- numbered by that filtered list. Reading the raw `simpleui_bar_tabs` setting
+--- instead shifts every index past a dropped id, so an override lands on the
+--- wrong cell (taps that "do nothing" or hijack another tab).
 function Host:dockTabs()
+    local ok_cfg, Config = pcall(require, "infra/sui_config")
+    if ok_cfg and Config and type(Config.loadTabConfig) == "function" then
+        local ok, tabs = pcall(Config.loadTabConfig)
+        if ok and type(tabs) == "table" and #tabs > 0 then return tabs end
+    end
     local store = sui_store()
     if not store then return nil end
     if store:readSetting("simpleui_bar_enabled", true) == false then return nil end
@@ -179,347 +65,185 @@ function Host:dockTabs()
     return tabs
 end
 
---- Resolve the icon FILE for a dock tab id via SimpleUI's own action registry
---- (user icon changes apply automatically). nil => text-only dock cell.
-function Host:dockIconFor(id)
-    local entry = Host:qaEntry(id)
-    local icon = entry and entry.icon
-    if type(icon) ~= "string" or icon == "" then return nil end
-    local ok_s, S = pcall(require, "features/sui_style")
-    if ok_s and S and type(S.safeIconPath) == "function" then
-        return S.safeIconPath(icon, nil)
-    end
-    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-    if ok_lfs and lfs.attributes(icon, "mode") == "file" then return icon end
-    return nil
-end
-
---- SimpleUI's QA.getEntry (its own icon/label/state resolution).
-function Host:qaEntry(id)
-    local ok, QA = pcall(require, "features/sui_quickactions")
-    if ok and QA and type(QA.getEntry) == "function" then
-        return QA.getEntry(id)
-    end
-    return nil
-end
-
---- Label shown for a dock tab. Prefers SimpleUI's own label.
-function Host:dockLabel(id)
-    local entry = Host:qaEntry(id)
-    if entry and type(entry.label) == "string" and entry.label ~= "" then
-        return entry.label
-    end
-    return tostring(id)
-end
-
--- Dock cell: CenterContainer + ImageWidget (file, is_icon, alpha) or text,
--- active indicator overlaid on top — same look as SimpleUI.
-local DockCell = InputContainer:extend{
-    icon = nil,
-    icon_sz = 0,
-    label = nil,
-    active = false,
-    indic_h = 0,
-    dock_cb = nil,
-    hold_cb = nil, -- long press (navpager arrows: jump to first/last)
-    dimmed = false, -- navpager arrow with no page in that direction
-}
-
-function DockCell:init()
-    self.dimen = Geom:new{ w = self.width, h = self.height }
-    local content
-    if self.icon then
-        content = ImageWidget:new{
-            file = self.icon,
-            width = self.icon_sz,
-            height = self.icon_sz,
-            is_icon = true,
-            alpha = true,
-            dim = self.dimmed or false,
-        }
-    else
-        content = TextWidget:new{
-            text = self.label or "",
-            face = Font:getFace("cfont", 14),
-            bold = self.active,
-        }
-    end
-    local centered = CenterContainer:new{
-        dimen = Geom:new{ w = self.width, h = self.height },
-        content,
-    }
-    if self.active and self.indic_h and self.indic_h > 0 then
-        self[1] = OverlapGroup:new{
-            dimen = Geom:new{ w = self.width, h = self.height },
-            allow_mirroring = false,
-            centered,
-            LineWidget:new{
-                dimen = Geom:new{ w = self.width, h = self.indic_h },
-                background = Blitbuffer.COLOR_BLACK,
-                overlap_offset = { 0, 0 },
-            },
-        }
-    else
-        self[1] = centered
-    end
-    self.ges_events = {
-        TapSelectButton = {
-            GestureRange:new{ ges = "tap", range = self.dimen },
-        },
-        HoldSelectButton = {
-            GestureRange:new{ ges = "hold", range = self.dimen },
-        },
-    }
-end
-
-function DockCell:onTapSelectButton()
-    if self.dock_cb then self.dock_cb() end
-    return true
-end
-
-function DockCell:onHoldSelectButton()
-    if self.hold_cb then self.hold_cb() end
-    return true
-end
-
-
---- Build the bottom dock row for height px (the reserved bottom band).
---- Returns a FrameContainer to place at the bottom of the view, or nil.
-function Host:bottomDock(height)
-    if not height or height <= 0 then return nil end
-    local store = sui_store()
+--- The dock tab id whose config matches `match(view, tab_id, cfg)`, or nil.
+function Host:findDockTab(match)
     local tabs = self:dockTabs()
-    if not tabs then return nil end
-    local function clamp_pct(key, def, lo, hi)
-        local v = store and tonumber(store:readSetting(key))
-        if not v then return def end
-        return math.max(lo, math.min(hi, v))
+    if not tabs or type(match) ~= "function" then return nil end
+    for _, id in ipairs(tabs) do
+        local ok, cfg = pcall(function() return self:dockConfig(id) end)
+        if ok and match(self, id, cfg) then return id end
     end
-    local bar_s = clamp_pct("simpleui_bar_size_pct", 100, 50, 150) / 100
-    local icon_s = clamp_pct("simpleui_bar_icon_scale_pct", 100, 50, 200) / 100
-    local bot_pct = clamp_pct("simpleui_bar_bottom_margin_pct", 100, 0, 300)
-    local side_m = Screen:scaleBySize(24)
-    local indicator_h = math.max(1, math.floor(Screen:scaleBySize(3) * bar_s))
-    local icon_sz = math.max(10, math.floor(Screen:scaleBySize(44) * bar_s * icon_s))
-    local top_sp = Screen:scaleBySize(2)
-    local bot_sp = math.floor(Screen:scaleBySize(12) * bot_pct / 100)
-    local sep_h = Screen:scaleBySize(1)
-    local pad_above = math.max(0, top_sp - sep_h)
-    local bar_h = math.max(1, height - top_sp - bot_sp)
-    local usable_w = math.max(1, self.screen_w - 2 * side_m)
-
-    local highlight = self._host and self._host.dock_highlight
-    local row = HorizontalGroup:new{}
-    local function tabCell(id, width)
-        local cfg = self:dockConfig(id)
-        local active = highlight and highlight(self, id, cfg) or false
-        return DockCell:new{
-            width = width,
-            height = bar_h,
-            icon = self:dockIconFor(id),
-            icon_sz = icon_sz,
-            label = self:dockLabel(id),
-            active = active,
-            indic_h = active and indicator_h or 0,
-            dock_cb = function() self:onDockTap(id) end,
-            show_parent = self,
-        }
-    end
-
-    if navpagerEnabled() then
-        -- Navpager mode: prev/next arrow cells at both ends, tabs in between.
-        -- Widths follow SimpleUI's own rule (equal cells, last one absorbs the
-        -- rounding remainder) over center_n + 2 slots.
-        local has_prev, has_next = self:navpagerArrowState()
-        local total_n = #tabs + 2
-        local cell_w  = math.floor(usable_w / total_n)
-        local function w_at(i)
-            return i == total_n and usable_w - cell_w * (total_n - 1) or cell_w
-        end
-        local function arrowCell(is_prev, enabled, index)
-            return DockCell:new{
-                width = w_at(index),
-                height = bar_h,
-                icon = navpagerIcon(is_prev),
-                icon_sz = icon_sz,
-                dimmed = not enabled,
-                dock_cb = function()
-                    if type(self.navpagerGo) == "function" then
-                        pcall(function()
-                            self:navpagerGo(is_prev and "prev" or "next")
-                        end)
-                    end
-                end,
-                hold_cb = function()
-                    if type(self.navpagerGo) == "function" then
-                        pcall(function()
-                            self:navpagerGo(is_prev and "first" or "last")
-                        end)
-                    end
-                end,
-                show_parent = self,
-            }
-        end
-        row[#row + 1] = arrowCell(true, has_prev, 1)
-        for index, id in ipairs(tabs) do
-            row[#row + 1] = tabCell(id, w_at(index + 1))
-        end
-        row[#row + 1] = arrowCell(false, has_next, total_n)
-    else
-        local cell_w = math.floor(usable_w / #tabs)
-        for index, id in ipairs(tabs) do
-            local width = index == #tabs
-                and usable_w - cell_w * (#tabs - 1) or cell_w
-            row[#row + 1] = tabCell(id, width)
-        end
-    end
-    local sep_bg = Blitbuffer.COLOR_GRAY
-    pcall(function() sep_bg = Blitbuffer.gray(0.72) end)
-    return FrameContainer:new{
-        background = Blitbuffer.COLOR_WHITE,
-        bordersize = 0, padding = 0, margin = 0,
-        width = self.screen_w,
-        height = height,
-        padding_left = side_m,
-        padding_right = side_m,
-        VerticalGroup:new{
-            align = "left",
-            VerticalSpan:new{ width = pad_above },
-            LineWidget:new{
-                dimen = Geom:new{ w = usable_w, h = sep_h },
-                background = sep_bg,
-            },
-            row,
-            VerticalSpan:new{ width = bot_sp },
-        },
-    }
+    return nil
 end
 
---- Tap on a dock tab. The hosting view gets first say via opts.dock_nav
---- (family-internal pages: switch in place, no FM replay). Anything it does
---- not handle follows the default: power = in-place dialog; navigation /
---- actions owned by SimpleUI drop this view and replay the tap on FM.
-function Host:onDockTap(tab_id)
-    -- Mark the transition: the repaint coalescer (ko_custom_patches) uses this
-    -- window to collapse the burst of "ui" dirtys the hand-back produces.
-    _G._wr_dock_transition_at = os.time()
-    local nav = self._host and self._host.dock_nav
-    if nav then
-        local cfg = self:dockConfig(tab_id)
-        if nav(self, tab_id, cfg) then
-            return true
+--- True when SimpleUI's Bar Injection API is available.
+function Host.nativeBarAvailable()
+    local ok, UI = pcall(require, "infra/sui_core")
+    return ok and UI and UI.BarInjection ~= nil
+end
+
+--- Register a Bar Injection descriptor (SimpleUI's official extension point for
+--- third-party widgets). Idempotent per id.
+local bi_registered = {}
+function Host.registerBarInjection(desc)
+    if type(desc) ~= "table" or not desc.id or bi_registered[desc.id] then return end
+    local ok, UI = pcall(require, "infra/sui_core")
+    if not ok or not UI or not UI.BarInjection then return end
+    local ok_reg = pcall(UI.BarInjection.register, desc)
+    if ok_reg then bi_registered[desc.id] = true end
+end
+
+--- Height of the FileManager's own pager row, measured live. Our in-page
+--- pager/period rows copy this so the three rows are identical by
+--- construction (and follow SimpleUI's font/icon settings automatically).
+--- Returns nil when the FM pager is not available (falls back to the shared
+--- metric at the call site).
+function Host:fmPagerRowHeight()
+    local h
+    pcall(function()
+        local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+        local fm = ok_f and FM.instance
+        local fc = fm and (fm.file_chooser or (fm.ui and fm.ui.file_chooser))
+        local grp = fc and fc.page_info
+        if grp and grp.getSize then
+            local sz = grp:getSize()
+            if sz and type(sz.h) == "number" and sz.h > 0 then h = sz.h end
         end
+    end)
+    return h
+end
+
+--- Index of `tab_id` in the rendered bar. SimpleUI names the centre-tab touch
+--- zones "navbar_pos_1..n" in BOTH modes (navpager's prev/next arrows are
+--- separate zone ids), so there is no slot offset to apply.
+function Host:renderedTabIndex(ctx, tab_id)
+    if not tab_id then return nil end
+    local tabs = (ctx and ctx.tabs) or self:dockTabs() or {}
+    for i, id in ipairs(tabs) do
+        if id == tab_id then return i end
     end
-    -- Power: in-place dialog over this view (like SimpleUI's own), so the
-    -- full-screen page does not need to close first.
-    if tab_id == "power" then
-        self:showPowerDialog()
-        return true
+    return nil
+end
+
+--- Replace the tap handler of one rendered dock slot. Used to keep a page's
+--- own semantics for a single tab (the family switch) while SimpleUI still
+--- draws the bar and handles every other zone.
+function Host:overrideDockTab(index, handler)
+    local zones = self._zones
+    if not (index and type(handler) == "function" and type(zones) == "table") then
+        return false
     end
-    local ok, FM = pcall(require, "apps/filemanager/filemanager")
-    local fm = ok and FM.instance
-    local plugin = fm and fm._simpleui_plugin
-    local function replay()
-        -- Mark the target tab active first so SimpleUI's onTabTap takes its
-        -- "already_active" shortcut: it then skips the eager replaceBar +
-        -- full-screen setDirty, which used to repaint the dock once while this
-        -- page was still on screen (double repaint = the visible flash on
-        -- e-ink). Only safe when the tab IS one of the configured tabs, since
-        -- then its indicator equals the action id (browse actions map to a
-        -- different indicator tab and keep the default path).
-        if plugin and tab_id ~= "homescreen" then
-            pcall(function()
-                local ok_cfg, Config = pcall(require, "infra/sui_config")
-                local tabs = ok_cfg and Config and Config.loadTabConfig
-                    and Config.loadTabConfig() or nil
-                for _, id in ipairs(tabs or {}) do
-                    if id == tab_id then
-                        plugin.active_action = tab_id
-                        break
-                    end
-                end
-            end)
-        end
-        if plugin and type(plugin._onTabTap) == "function" then
-            pcall(plugin._onTabTap, plugin, tab_id, fm)
-        end
+    local z = zones["navbar_pos_" .. index]
+    if type(z) ~= "table" then
+        logger.info("wrZoneTab: override MISSING navbar_pos_" .. tostring(index))
+        return false
     end
-    local function close_self()
-        pcall(function()
-            if self.onClose then self:onClose() end
-        end)
-    end
-    if tab_id == "home" or tab_id == "sui_settings"
-        or tab_id == "settings" or tab_id == "history" then
-        close_self()
-        UIManager:scheduleIn(0, replay)
-        return true
-    end
-    if tab_id == "homescreen" then
-        replay()
-        close_self()
-        return true
-    end
-    close_self()
-    UIManager:scheduleIn(0, replay)
+    z.handler = handler
+    logger.info("wrZoneTab: override OK navbar_pos_" .. tostring(index))
     return true
 end
 
---- In-place power dialog (mirrors SimpleUI's), shown over this view.
-function Host:showPowerDialog()
-    if self._host_power_dialog then return end -- ignore double taps
-    local ButtonDialog = require("ui/widget/buttondialog")
-    local Event = require("ui/event")
-    local L = self._host and self._host.labels or {}
-    local dialog_w = math.floor(Screen:getWidth() * 0.42)
-    local function _clear()
-        self._host_power_dialog = nil
-    end
-    local buttons = {}
-    if Device:canRestart() then
-        buttons[#buttons + 1] = {{ text = L.restart or "重启", callback = function()
-            local d = self._host_power_dialog
-            self._host_power_dialog = nil
-            UIManager:close(d)
-            UIManager:broadcastEvent(Event:new("Restart"))
-        end }}
-    end
-    if Device:canReboot() then
-        buttons[#buttons + 1] = {{ text = L.reboot or "重新引导", callback = function()
-            local d = self._host_power_dialog
-            self._host_power_dialog = nil
-            UIManager:close(d)
-            UIManager:askForReboot()
-        end }}
-    end
-    if Device:canSuspend() then
-        buttons[#buttons + 1] = {{ text = L.suspend or "休眠", callback = function()
-            local d = self._host_power_dialog
-            self._host_power_dialog = nil
-            UIManager:close(d)
-            UIManager:flushSettings()
-            UIManager:suspend()
-        end }}
-    end
-    buttons[#buttons + 1] = {{ text = L.exit or "退出", callback = function()
-        local d = self._host_power_dialog
-        self._host_power_dialog = nil
-        UIManager:close(d)
-        local ok_l, logger = pcall(require, "logger")
-        if ok_l then logger.info("wrHost: power-exit: dialog closed, broadcasting Exit") end
-        UIManager:broadcastEvent(Event:new("Exit"))
-        if ok_l then logger.info("wrHost: power-exit: Exit broadcast returned") end
+--- A/B switch for the 10px top lift our header had before this page was hosted
+--- natively. It was tuned together with the FM content lift (see
+--- ko_custom_patches.FM_CONTENT_LIFT); with both pages natively hosted it may no
+--- longer be needed. true = old behaviour (lift 10px up), false = no lift.
+local NATIVE_TOP_LIFT = false
+
+--- Post-injection fixups: SimpleUI builds the wrapped bar with the *previous*
+--- tab as active (a BI widget is not one of its named screens), so we rebuild it
+--- with the tab that represents this page; and (when enabled) we re-apply the
+--- 10px top lift.
+local function afterInject(w, ctx, match)
+    pcall(function()
+        local tabs = (ctx and ctx.tabs) or nil
+        local active = w:findDockTab(match)
+        local ok_b, B = pcall(require, "screens/sui_bottombar")
+        if active and ok_b and B and B.buildBarWidget and B.replaceBar then
+            local bar = B.buildBarWidget(active, tabs)
+            if bar then
+                B.replaceBar(w, bar, tabs)
+                -- No setDirty here: this runs inside UIManager:show, whose own
+                -- first paint already includes the bar we just swapped in. A
+                -- second full repaint at that instant is an extra e-ink refresh
+                -- the user perceives as a flash.
+            end
+        end
+        local inner = w._navbar_inner
+        local topbar_h = w._navbar_topbar_h or 0
+        if NATIVE_TOP_LIFT and inner and inner.overlap_offset and topbar_h > 0 then
+            inner.overlap_offset[2] = topbar_h - Screen:scaleBySize(10)
+        end
+        -- SimpleUI applies its sub-page titlebar to every injected widget, and
+        -- that unconditionally adds a back button on the left. Our pages never
+        -- had one, so push it off-screen (its own hidden-button technique; we
+        -- do NOT touch the global "sub_back" setting, which other pages use).
+        local back = w._titlebar_sub_back_btn
+        if back then
+            back.overlap_align = nil
+            back.overlap_offset = { Screen:getWidth() * 2, 0 }
+            back.callback = function() end
+            back.hold_callback = function() end
+        end
+        -- SimpleUI builds the wrapped bar while the widget is still being
+        -- shown (not yet on the window stack), so its getNavpagerState() reads
+        -- the PREVIOUS page — our arrows then stay in that page's state (usually
+        -- both dimmed). Tell it our own paging state right after the show
+        -- completes.
         pcall(function()
-            if self.onClose then self:onClose() end
+            local ok_cfg2, Config2 = pcall(require, "infra/sui_config")
+            if not (ok_cfg2 and Config2 and Config2.isNavpagerEnabled
+                    and Config2.isNavpagerEnabled()) then return end
+            local ok_bb, Bottombar = pcall(require, "screens/sui_bottombar")
+            if not (ok_bb and Bottombar and Bottombar.updateNavpagerArrows) then return end
+            UIManager:scheduleIn(0.05, function()
+                pcall(function()
+                    local p, pn = w.page, w.page_num
+                    local numeric = type(p) == "number" and type(pn) == "number"
+                    local prev = numeric and p > 1 or false
+                    local nxt = numeric and p < pn or false
+                    Bottombar.updateNavpagerArrows(w, prev, nxt)
+                    UIManager:setDirty(w, "ui")
+                    -- TEMP: confirm what we reported
+                    logger.info("wrNav: page=" .. tostring(p) .. "/"
+                        .. tostring(pn) .. " prev=" .. tostring(prev)
+                        .. " next=" .. tostring(nxt))
+                end)
+            end)
         end)
-        if ok_l then logger.info("wrHost: power-exit: view closed, callback done") end
-    end }}
-    self._host_power_dialog = ButtonDialog:new{
-        width = dialog_w,
-        tap_close_callback = _clear,
-        buttons = buttons,
+    end)
+end
+
+local STATS_MATCH = function(_, _, cfg)
+    return cfg ~= nil and cfg.dispatcher_action == "weread_reading_statistics"
+end
+
+local SHELF_MATCH = function(_, _, cfg)
+    return cfg ~= nil and cfg.plugin_key == "weread"
+        and (cfg.plugin_method == nil or cfg.plugin_method == "launch")
+end
+
+--- Descriptors for the two weread pages (registered lazily, simpleui-only).
+function Host.ensureBarDescriptors()
+    Host.registerBarInjection{
+        id          = "weread_stats",
+        widget_name = "weread_stats",
+        get_active_action = function(w)
+            return w:findDockTab(STATS_MATCH)
+        end,
+        is_pageable = true,
+        on_inject = function(w, ctx) afterInject(w, ctx, STATS_MATCH) end,
     }
-    UIManager:show(self._host_power_dialog)
+    Host.registerBarInjection{
+        id          = "weread_shelf",
+        widget_name = "weread_shelf",
+        get_active_action = function(w)
+            return w:findDockTab(SHELF_MATCH)
+        end,
+        -- pageable: SimpleUI then draws navpager arrows and routes their taps
+        -- to our onPrevPage/onNextPage/onGotoPage.
+        is_pageable = true,
+        on_inject = function(w, ctx) afterInject(w, ctx, SHELF_MATCH) end,
+    }
 end
 
 --- Frontlight swipe (left edge / two fingers), KOReader-consistent.
@@ -566,7 +290,9 @@ function Host:onFrontlightSwipe(ges)
     return true
 end
 
---- Top-edge menu opening (mirrors native FileManager zones).
+--- Top-edge menu opening (mirrors native FileManager zones). Only used when
+--- SimpleUI's Bar Injection is unavailable: when it hosts the page it registers
+--- equivalent zones itself.
 local function fm_menu_open(ges, method)
     local ok, FM = pcall(require, "apps/filemanager/filemanager")
     local menu = ok and FM.instance and FM.instance.menu
@@ -584,54 +310,54 @@ function Host:onTopSwipeMenu(ges)
     return fm_menu_open(ges, "onSwipeShowMenu")
 end
 
---- Register this view's touch zones. Call from your view's onShow (or once
---- after show). Zone geometry: top 1/8 full-width tap + swipe and middle EXT
---- band open the native menu; a NARROW left-edge strip (24px, not 1/8)
---- adjusts the frontlight so content scrolling is not eaten by a wide light
---- strip; two-finger swipe adjusts it anywhere.
-function Host:registerHostGestures()
+--- Register this view's touch zones. Call from your view's onShow.
+--- `skip_top_menu` is true when SimpleUI hosts the page (it registers the
+--- top-edge menu zones itself); the frontlight zones are always ours.
+function Host:registerHostGestures(skip_top_menu)
     -- left-edge strip matching KOReader's native DSWIPE_ZONE_LEFT_EDGE (1/8)
     local fl_edge_w = 1 / 8
-    self:registerTouchZones({
-        {
+    local zones = {}
+    if not skip_top_menu then
+        zones[#zones + 1] = {
             id = "host_top_tap_menu",
             ges = "tap",
             screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 / 8 },
             handler = function(ges) return self:onTopTapMenu(ges) end,
-        },
-        {
+        }
+        zones[#zones + 1] = {
             id = "host_top_swipe_menu",
             ges = "swipe",
             screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 / 8 },
             handler = function(ges) return self:onTopSwipeMenu(ges) end,
-        },
-        {
+        }
+        zones[#zones + 1] = {
             id = "host_top_swipe_menu_ext",
             ges = "swipe",
             screen_zone = { ratio_x = 1 / 4, ratio_y = 0, ratio_w = 2 / 4, ratio_h = 1 / 5 },
             handler = function(ges) return self:onTopSwipeMenu(ges) end,
-        },
-        {
-            id = "host_fl_left_edge",
-            ges = "swipe",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = fl_edge_w, ratio_h = 1 },
-            handler = function(ges) return self:onFrontlightSwipe(ges) end,
-        },
-        {
-            id = "host_fl_two_finger",
-            ges = "two_finger_swipe",
-            screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
-            handler = function(ges) return self:onFrontlightSwipe(ges) end,
-        },
-    })
+        }
+    end
+    zones[#zones + 1] = {
+        id = "host_fl_left_edge",
+        ges = "swipe",
+        screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = fl_edge_w, ratio_h = 1 },
+        handler = function(ges) return self:onFrontlightSwipe(ges) end,
+    }
+    zones[#zones + 1] = {
+        id = "host_fl_two_finger",
+        ges = "two_finger_swipe",
+        screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1 },
+        handler = function(ges) return self:onFrontlightSwipe(ges) end,
+    }
+    self:registerTouchZones(zones)
 end
 
--- Install the host facilities onto a view instance. Idempotent-ish: call
--- once from the view's init with its options table.
---- KOReader's Exit broadcast reaches every stacked widget. When a third
---- party menu (e.g. SimpleUI's power menu Quit) broadcasts Exit while this
---- hosted view still covers the FM, we close ourselves so the FM teardown
---- finds a clean stack (mirrors the dock power path which closes first).
+--- KOReader's Exit / Restart / Suspend events reach every stacked widget. When
+--- a third-party menu (e.g. SimpleUI's power menu, which works purely by
+--- broadcastEvent) fires one while this hosted view still covers the
+--- FileManager, we must close ourselves so the teardown / suspend can proceed —
+--- otherwise nothing appears to happen. (Sleep calls UIManager:suspend()
+--- directly; the same rule keeps the stack clean for it.)
 function Host:onExit()
     pcall(function()
         if self.onClose then self:onClose() end
@@ -639,25 +365,46 @@ function Host:onExit()
     return true
 end
 
+--- Close this page as part of an in-app navigation (the bookshelf <-> stats
+--- family switch). SimpleUI's UIManager.close wrapper skips its "restore the FM
+--- tab" rebuild + setDirty when the closing widget carries this flag — that
+--- rebuild repaints the (now covered) FileManager and is the remaining source of
+--- the switch flash. SimpleUI's own navigate sets exactly this flag.
+function Host:closeForNavigation()
+    pcall(function()
+        self._navbar_closing_intentionally = true
+        if self.onClose then self:onClose() end
+        self._navbar_closing_intentionally = nil
+    end)
+    return true
+end
+
+function Host:onRestart()
+    return Host.onExit(self)
+end
+
+function Host:onSuspend()
+    return Host.onExit(self)
+end
+
 --- Localisable strings (optional). opts.labels = {
----   restart / reboot / suspend / exit,           -- power dialog button texts
 ---   frontlight_off,                              -- frontlight-off notice
 ---   frontlight_set,                              -- string with %1, or a function(value)
 --- }
 function Host.install(view, opts)
     if view._host then return end
     view._host = opts or {}
-    -- screen geometry helpers the dock needs
     if not view.screen_w then
         view.screen_w = Screen:getWidth()
         view.screen_h = Screen:getHeight()
     end
     -- inject the host methods onto this instance
     for _, name in ipairs({
-        "reservedBands", "dockTabs", "dockConfig", "dockIconFor", "dockLabel",
-        "bottomDock", "onDockTap", "showPowerDialog", "onExit",
-        "onFrontlightSwipe", "onTopTapMenu", "onTopSwipeMenu",
-        "registerHostGestures", "navpagerArrowState",
+        "dockConfig", "dockTabs", "findDockTab", "ensureBarDescriptors",
+        "registerHostGestures", "onFrontlightSwipe",
+        "onTopTapMenu", "onTopSwipeMenu",
+        "onExit", "onRestart", "onSuspend", "closeForNavigation",
+        "renderedTabIndex", "overrideDockTab", "fmPagerRowHeight",
     }) do
         if not view[name] then
             view[name] = Host[name]

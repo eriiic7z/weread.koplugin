@@ -371,7 +371,6 @@ function M:showShelfView(mode, keyword, old_view, options)
             end
         end
     end
-    if old_view then UIManager:close(old_view) end
     local view
     view = LibraryView.show({
         mode = mode,
@@ -400,9 +399,8 @@ function M:showShelfView(mode, keyword, old_view, options)
             self:showShelfView(new_mode, keyword, view, next_options)
         end,
         on_stats = function(shelf_view)
-            -- family-internal: open the reading-stats page (hosted overlay
-            -- with its own dock/bands). The shelf view is closed by the stats
-            -- loader once its data is ready, so no FM/home flash in between.
+            -- family-internal: open the stats page over the shelf and close the
+            -- shelf only once the stats data is ready (no FM/home flash)
             self:showReadStats(nil, shelf_view)
         end,
         on_search = function()
@@ -450,6 +448,26 @@ function M:showShelfView(mode, keyword, old_view, options)
             self:showShelfView(mode, keyword, view, next_options)
         end,
     })
+    -- Close the previous view only AFTER the new one is on top: UIManager:close
+    -- repaints what it uncovers synchronously, so closing first painted the FM
+    -- (or the previous mode's grid) just to cover it again — that double paint is
+    -- the flash seen when switching 书籍 / 公众号.
+    if old_view then
+        -- Defer the close to the next event-loop tick: this runs inside the old
+        -- view's own tap callback, and closing a widget while KOReader is still
+        -- dispatching that gesture can leave the input chain stuck (every later
+        -- tap then does nothing). Deferring is also flash-free: the new view is
+        -- already on top, so closing underneath repaints nothing visible.
+        UIManager:scheduleIn(0, function()
+            pcall(function()
+                if old_view.closeForNavigation then
+                    old_view:closeForNavigation()
+                else
+                    UIManager:close(old_view)
+                end
+            end)
+        end)
+    end
     if paged then self.shelf_view_pages[mode] = view.page end
     self.shelf_view = view
     if cover_mode and not skip_cover_fetch_once then
@@ -1621,8 +1639,8 @@ function M:searchWithUI(keyword)
             return
         end
         local items = {}
-        for group_index, group in ipairs(result.results or {}) do
-            for book_index, entry in ipairs(group.books or {}) do
+        for _, group in ipairs(result.results or {}) do
+            for _, entry in ipairs(group.books or {}) do
                 local book = entry.bookInfo or entry
                 table.insert(items, {
                     text = book.title or book.bookId or tr("Untitled"),

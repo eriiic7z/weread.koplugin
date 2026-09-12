@@ -22,8 +22,15 @@ local M = {
     FACE      = "smalltfont",
     FACE_SIZE = 26,
 
-    TOP_PADDING    = 6, -- title bar top padding (书架页 / 统计页)
-    FM_TOP_PADDING = 0, -- FM exception, see header note
+    TOP_PADDING    = 0, -- title bar top padding, identical on all three pages
+                       -- (the FileManager title sits at the content top; the
+                       -- weread pages match it so the headers line up)
+    FM_TOP_PADDING = 0, -- kept for call sites that name the FM case explicitly
+
+    -- Height of the control row under the separator (FileManager toolbar row:
+    -- icon glyph 26 + 8 tap padding). The shelf tool row and the stats tab row
+    -- use the same height so all three headers are structurally identical.
+    ROW_H = 34,
 
     LINE_GAP   = 6.5,  -- separator: below the title text box
     LINE_INSET = 24,   -- separator: inset on both sides (== cover grid / dock)
@@ -35,6 +42,11 @@ local M = {
     -- 2*13 on each side. Layout footprint, icon size and spacing stay as they
     -- are; only "what counts as a tap" grows.
     TOUCH = 48,
+
+    -- Height of an in-page pager row. The FileManager's own pager row is the
+    -- reference every pager/period row must match (it measures 52px on the
+    -- reference device = 29 design units, incl. KOReader's Size.padding.button).
+    PAGER_ROW_H = 29,
 }
 
 return M

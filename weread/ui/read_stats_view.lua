@@ -36,6 +36,7 @@ local LineWidget = require("ui/widget/linewidget")
 local RightContainer = require("ui/widget/container/rightcontainer")
 local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local Size = require("ui/size")
+local logger = require("weread.lib.logger")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
 local TitleBar = require("ui/widget/titlebar")
@@ -488,12 +489,13 @@ function ReadStatsView:buildTabBar()
         end
         table.insert(row, button)
     end
-    return FrameContainer:new{
+    local tab_frame = FrameContainer:new{
         bordersize = 0, padding = 0, margin = 0,
         padding_left = side,
         padding_right = side,
         row,
     }
+    return tab_frame
 end
 
 --- Navpager hooks (SimpleUI's bottom-bar mode): the dock-end arrows take over
@@ -504,24 +506,33 @@ local function navpagerOn()
     return ok and cfg and cfg.isNavpagerEnabled and cfg.isNavpagerEnabled() or false
 end
 
-function ReadStatsView:navpagerState()
-    local d = self.data or {}
-    return d.allow_prev == true, d.allow_next == true
+--- Period navigation: with navpager the bottom-bar arrows drive it (SimpleUI
+--- reads page/page_num), taps call onPrevPage/onNextPage, holds call
+--- onGotoPage(1) for the prev arrow (earliest period) and onGotoPage(page_num)
+--- for the next arrow (newest period). The virtual pager below maps exactly that
+--- state onto allow_prev/allow_next, so the arrows show/dim correctly.
+function ReadStatsView:onPrevPage()
+    self:onPrevPeriod()
+    return true
 end
 
-function ReadStatsView:navpagerGo(dir)
-    if dir == "prev" then
-        self:onPrevPeriod()
-    elseif dir == "next" then
-        self:onNextPeriod()
-    elseif dir == "last" and self.on_latest then
-        -- "jump to newest": the data layer has no period index, but the newest
-        -- period is just "now" (base_time = nil) — one reload, no loop.
-        self.on_latest()
-    end
-    -- "first" (earliest period) is intentionally a no-op: allow_prev is
-    -- unbounded, so there is no reachable earliest period to jump to.
+function ReadStatsView:onNextPage()
+    self:onNextPeriod()
+    return true
 end
+
+function ReadStatsView:onGotoPage(page)
+    if page and page <= 1 then
+        -- earliest period: allow_prev is unbounded, so there is nothing to jump
+        -- to (same as before the native migration)
+        return true
+    end
+    if self.on_latest then self.on_latest() end
+    return true
+end
+
+--- Period navigation stays on the in-page row when navpager is off; with
+--- navpager on the row is hidden and the bottom-bar arrows take over.
 
 function ReadStatsView:buildNavRow()
     local d = self.data
@@ -529,6 +540,10 @@ function ReadStatsView:buildNavRow()
         self._nav_buttons = {}
         return nil
     end
+    -- Copy the FileManager pager row's height (measured live) so this row and
+    -- the shelf's pager row match it exactly; shared metric as a fallback.
+    local row_h = self:fmPagerRowHeight()
+        or Screen:scaleBySize(TitleMetrics.PAGER_ROW_H)
     -- bookshelf rule: button height = text line + small vertical padding
     local pad_v = Screen:scaleBySize(1)
     local function mk(text, enabled, cb)
@@ -548,15 +563,15 @@ function ReadStatsView:buildNavRow()
         HorizontalSpan:new{ width = Screen:scaleBySize(8) },
         next_button,
     }
-    local gh = math.max(1, group:getSize().h)
-    return FrameContainer:new{
+    local row = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
         bordersize = 0, padding = 0, margin = 0,
         CenterContainer:new{
-            dimen = Geom:new{ w = self.screen_w, h = gh },
+            dimen = Geom:new{ w = self.screen_w, h = row_h },
             group,
         },
     }
+    return row
 end
 
 function ReadStatsView:init()
@@ -565,31 +580,18 @@ function ReadStatsView:init()
     self.screen_h = Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.screen_h }
     if self.host then
-        -- Reusable full-screen host: SimpleUI reserved bands + dock + gestures.
-        -- Active dock item = the reading-statistics QA; the WeRead-launch item
-        -- navigates back to the bookshelf.
-        FullscreenHost.install(self, {
-            dock_highlight = function(_, _, cfg)
-                return cfg ~= nil and cfg.dispatcher_action == "weread_reading_statistics"
-            end,
-            dock_nav = function(view, _, cfg)
-                if cfg and cfg.dispatcher_action == "weread_reading_statistics" then
-                    return true -- current page
-                end
-                if cfg and cfg.plugin_key == "weread" then
-                    -- back to the bookshelf
-                    if view.on_bookshelf then view.on_bookshelf() end
-                    return true
-                end
-                return false
-            end,
-        })
-        self.top_gap, self.bottom_gap = self:reservedBands()
-        -- same top lift as the bookshelf so the stats title sits at the same
-        -- height as the 微信读书 shelf title
-        self.top_gap = math.max(0, self.top_gap - Screen:scaleBySize(10))
-        self.covers_fullscreen = false
-        self.dock = self:bottomDock(self.bottom_gap)
+        -- SimpleUI hosts this page through its Bar Injection API: real top/bottom
+        -- bars with every setting applied, its own top-edge menu gestures, bar
+        -- taps, highlight and close handling. We only keep the frontlight gestures.
+        FullscreenHost.install(self)
+        self.native_bar = FullscreenHost.nativeBarAvailable()
+        if self.native_bar then
+            self:ensureBarDescriptors()
+            -- BarInjection matches shown widgets by name.
+            self.name = "weread_stats"
+        end
+        self.covers_fullscreen = true
+        self.top_gap, self.bottom_gap = 0, 0
     else
         self.covers_fullscreen = true
     end
@@ -611,6 +613,13 @@ function ReadStatsView:init()
     end
 
     local d = self.data
+    -- Virtual pager state for SimpleUI's native navpager arrows: "page > 1"
+    -- means a previous period exists, "page < page_num" a next one. The arrow
+    -- handlers below turn that back into period navigation — the behaviour this
+    -- page had before the native migration. (Only meaningful while navpager is
+    -- on; harmless otherwise.)
+    self.page = (d.allow_prev == true) and 2 or 1
+    self.page_num = self.page + ((d.allow_next == true) and 1 or 0)
     local mode_title = tr(MODE_TITLE[d.mode] or "Reading statistics")
     local title = (d.period_label and d.period_label ~= "")
         and T("%1 · %2", mode_title, d.period_label) or mode_title
@@ -628,6 +637,8 @@ function ReadStatsView:init()
     }
 
     local tab_bar = self:buildTabBar()
+    -- Navpager mode hands period navigation to the native dock arrows, so the
+    -- in-page row is hidden while it is on (pre-migration behaviour).
     local nav_row
     if not navpagerOn() then
         nav_row = self:buildNavRow()
@@ -641,11 +652,20 @@ function ReadStatsView:init()
     -- no title separator line: tab row sits directly under the title
     local top_h = self.title_bar:getHeight() + tab_bar:getSize().h
     local nav_h = nav_row and nav_row:getSize().h or 0
-    local vreserve = 0
-    if self.host then
-        vreserve = (self.top_gap or 0) + (self.bottom_gap or 0)
+    -- Available height for our own content: with the native bar, SimpleUI's
+    -- wrapper already holds the top/bottom bars, so we lay out on the content
+    -- height it provides (same value as the bands we used to reserve).
+    local layout_h = self.screen_h
+    if self.host and self.native_bar then
+        local ok_core, UI = pcall(require, "infra/sui_core")
+        if ok_core and UI and UI.getContentHeight then
+            local ok_h, h = pcall(UI.getContentHeight)
+            if ok_h and type(h) == "number" and h > 0 then layout_h = h end
+        end
     end
-    local scroll_h = self.screen_h - top_h - nav_h - vreserve
+    local vreserve = 0
+    local scroll_h = layout_h - top_h - nav_h - vreserve
+    self.layout_h = layout_h
 
     local scroll = ScrollableContainer:new{
         dimen = Geom:new{ w = self.screen_w, h = scroll_h },
@@ -691,34 +711,12 @@ function ReadStatsView:init()
         table.insert(body, nav_row)
     end
 
-    if self.host then
-        -- hosted layout: transparent top band (SimpleUI status bar), white
-        -- content panel, dock at the bottom
-        self[1] = FrameContainer:new{
-            bordersize = 0, padding = 0, margin = 0,
-            dimen = self.dimen:copy(),
-            VerticalGroup:new{
-                align = "left",
-                VerticalSpan:new{ width = self.top_gap or 0 },
-                FrameContainer:new{
-                    background = Blitbuffer.COLOR_WHITE,
-                    bordersize = 0, padding = 0, margin = 0,
-                    width = self.screen_w,
-                    body,
-                },
-                self.dock or VerticalSpan:new{ width = self.bottom_gap or 0 },
-            },
-        }
-    else
-        self[1] = FrameContainer:new{
-            background = Blitbuffer.COLOR_WHITE,
-            bordersize = 0,
-            padding = 0,
-            margin = 0,
-            dimen = self.dimen:copy(),
-            body,
-        }
-    end
+    self[1] = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = 0, padding = 0, margin = 0,
+        dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h },
+        body,
+    }
 end
 
 --- Scrollbar appears/updates only after layout, so re-apply the light colour
@@ -733,8 +731,12 @@ function ReadStatsView:applyScrollbarColor()
 end
 
 function ReadStatsView:onShow()
+    logger.info("wrFlow: stats onShow")
     if self.host then
-        self:registerHostGestures()
+        -- With the native bar SimpleUI already registers the top-edge menu
+        -- tap/swipe zones for injected widgets, so only our frontlight zones
+        -- are still needed.
+        self:registerHostGestures(self.native_bar == true)
     end
     self:applyScrollbarColor()
     UIManager:setDirty(self, function() return "ui", self.dimen end)
@@ -742,6 +744,7 @@ function ReadStatsView:onShow()
 end
 
 function ReadStatsView:onClose()
+    logger.info("wrFlow: stats onClose")
     UIManager:close(self)
     return true
 end
@@ -751,6 +754,28 @@ function ReadStatsView:onSwitchMode(mode)
         self.on_switch(mode)
     end
     return true
+end
+
+--- Called by the touch-zone wrapper right after SimpleUI installed this page's
+--- bar zones (they do not exist at on_inject time). Take over just the
+--- bookshelf tab's tap semantics, mirroring the shelf's switch.
+function ReadStatsView:on_zones_registered()
+    if self.native_bar ~= true then return end
+    local shelf_id = self:findDockTab(function(_, _, cfg)
+        return cfg ~= nil and cfg.plugin_key == "weread"
+            and (cfg.plugin_method == nil or cfg.plugin_method == "launch")
+    end)
+    if not shelf_id then return end
+    local index = self:renderedTabIndex(nil, shelf_id)
+    if not index then return end
+    self:overrideDockTab(index, function()
+        logger.info("wrFlow: tap shelf tab -> back to bookshelf")
+        -- Defensive: an unhandled error here breaks KOReader's input chain.
+        pcall(function()
+            if self.on_bookshelf then self.on_bookshelf() end
+        end)
+        return true
+    end)
 end
 
 function ReadStatsView:onPrevPeriod()

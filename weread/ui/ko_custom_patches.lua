@@ -232,6 +232,11 @@ end
 --- Lift the whole SimpleUI-wrapped FM content up so the FM title aligns with
 --- the weread shelf title (measured: 7px). The wrap offset lives on
 --- fm._navbar_inner.overlap_offset; adjusting it moves the title bar too.
+-- A/B switch: the weread pages are natively hosted now, so this lift (tuned
+-- against the old self-drawn pages) may no longer be needed. true = old
+-- behaviour (lift 7px up), false = no lift.
+local FM_CONTENT_LIFT = false
+
 local function liftFMContent()
     pcall(function()
         local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
@@ -415,9 +420,9 @@ local function installPagerTextPatch()
             if self.page_info and self.page_info.resetLayout then
                 self.page_info:resetLayout()
             end
-            local ok_ui, UIManager = pcall(require, "ui/uimanager")
-            if ok_ui and UIManager then
-                UIManager:setDirty(self.show_parent or "all", "ui")
+            local ok_ui2, UIMgr2 = pcall(require, "ui/uimanager")
+            if ok_ui2 and UIMgr2 then
+                UIMgr2:setDirty(self.show_parent or "all", "ui")
             end
         end)
         return res
@@ -509,139 +514,270 @@ local installFMToolbarPatch
 --- hold_release does not fire a second time. Arrow boundaries are read from
 --- SimpleUI's own navbar_pos_prev/next zones, so its geometry stays the source
 --- of truth.
-local function installNavpagerHoldPatch()
-    local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
-    local fm = ok_f and FM.instance
-    if not fm or type(fm.registerTouchZones) ~= "function" then return end
-    if fm._wr_navpager_hold_patched then return end
-    fm._wr_navpager_hold_patched = true
-    local orig_register = fm.registerTouchZones
-    fm.registerTouchZones = function(self, zones)
-        pcall(function()
-            local ok_cfg, Config = pcall(require, "infra/sui_config")
-            if not (ok_cfg and Config and Config.isNavpagerEnabled
-                    and Config.isNavpagerEnabled()) then return end
-            local sw = Screen:getWidth()
-            local prev_end_x, next_x, hold_start, hold_settings
-            for _, z in ipairs(zones or {}) do
-                local sz = z.screen_zone
-                if z.id == "navbar_pos_prev" and sz then
-                    prev_end_x = (sz.ratio_x + sz.ratio_w) * sw
-                elseif z.id == "navbar_pos_next" and sz then
-                    next_x = sz.ratio_x * sw
-                elseif z.id == "navbar_hold_start" then
-                    hold_start = z
-                elseif z.id == "navbar_hold_settings" then
-                    hold_settings = z
+--- Make the navpager arrows jump on HOLD (not on release) for every widget
+--- SimpleUI registers its bar zones on — the FileManager and any page it hosts
+--- through the Bar Injection API. SimpleUI's own zones are hold_release, while
+--- our pages used to fire on hold; this keeps the two identical.
+-- Arrow boundaries are read from SimpleUI's own navbar_pos_prev/next zones, so
+-- its geometry stays the source of truth.
+local function rewriteNavpagerHold(zones)
+    local ok_cfg, Config = pcall(require, "infra/sui_config")
+    if not (ok_cfg and Config and Config.isNavpagerEnabled
+            and Config.isNavpagerEnabled()) then return end
+    local sw = Screen:getWidth()
+    local prev_end_x, next_x, hold_start, hold_settings
+    for _, z in ipairs(zones or {}) do
+        local sz = z.screen_zone
+        if z.id == "navbar_pos_prev" and sz then
+            prev_end_x = (sz.ratio_x + sz.ratio_w) * sw
+        elseif z.id == "navbar_pos_next" and sz then
+            next_x = sz.ratio_x * sw
+        elseif z.id == "navbar_hold_start" then
+            hold_start = z
+        elseif z.id == "navbar_hold_settings" then
+            hold_settings = z
+        end
+    end
+    if not (hold_start and hold_settings and prev_end_x and next_x) then
+        return
+    end
+    local handled = false
+    -- Direction state comes from the topmost pageable widget we can see, and only
+    -- falls back to SimpleUI's resolver. Keeping the primary source here means
+    -- the hold path cannot silently depend on a foreign helper's semantics.
+    local function stateFromTop()
+        local ok_ui, UIMgr = pcall(require, "ui/uimanager")
+        if ok_ui and UIMgr then
+            local stack = UIMgr._window_stack or UIMgr.window_stack
+            for i = #(stack or {}), 1, -1 do
+                local w = stack[i] and stack[i].widget
+                if w and type(w.page) == "number"
+                        and type(w.page_num) == "number" then
+                    return w.page > 1, w.page < w.page_num
                 end
             end
-            if not (hold_start and hold_settings and prev_end_x and next_x) then
-                return
-            end
-            local handled = false
-            local function hasDir(dir)
-                local prev, nxt = false, false
-                if Config.getNavpagerState then
-                    local ok_s, p, n = pcall(Config.getNavpagerState)
-                    if ok_s then prev, nxt = p, n end
+        end
+        local prev, nxt = false, false
+        if Config.getNavpagerState then
+            local ok_s, p, n = pcall(Config.getNavpagerState)
+            if ok_s then prev, nxt = p, n end
+        end
+        return prev == true, nxt == true
+    end
+    local function hasDir(dir)
+        local prev, nxt = stateFromTop()
+        if dir == "prev" then return prev end
+        return nxt
+    end
+    -- Same resolution SimpleUI uses: topmost pageable widget on the stack,
+    -- otherwise the FileManager's file chooser. Returns true when the jump was
+    -- actually handed to a target (so the caller knows whether to swallow the
+    -- release or let SimpleUI have it).
+    local function gotoPage(page)
+        local ok_ui, UIMgr = pcall(require, "ui/uimanager")
+        if ok_ui and UIMgr then
+            local stack = UIMgr._window_stack or UIMgr.window_stack
+            for i = #(stack or {}), 1, -1 do
+                local w = stack[i] and stack[i].widget
+                if w then
+                    local target, fn
+                    if type(w.onGotoPage) == "function"
+                            and type(w.page_num) == "number" then
+                        target, fn = w, w.onGotoPage
+                    elseif w.file_chooser
+                            and type(w.file_chooser.onGotoPage) == "function"
+                            and type(w.file_chooser.page_num) == "number" then
+                        target, fn = w.file_chooser, w.file_chooser.onGotoPage
+                    end
+                    if target then
+                        local ok = pcall(function()
+                            fn(target, page or target.page_num)
+                        end)
+                        if ok then return true end
+                    end
                 end
-                if dir == "prev" then return prev == true end
-                return nxt == true
             end
-            local function gotoPage(page)
-                local fc = self.file_chooser or self
-                if type(fc.onGotoPage) == "function"
-                        and type(fc.page_num) == "number" then
-                    pcall(function() fc:onGotoPage(page or fc.page_num) end)
-                end
-            end
-            local orig_start = hold_start.handler
-            hold_start.handler = function(ges)
-                local x = ges and ges.pos and ges.pos.x or -1
-                -- jump while the finger is still down, like our dock arrows
-                if x >= 0 and x < prev_end_x then
-                    if hasDir("prev") then gotoPage(1) end
-                    handled = true
-                    return true
-                elseif next_x and x >= next_x then
-                    if hasDir("next") then gotoPage(nil) end
-                    handled = true
-                    return true
-                end
-                handled = false
-                if orig_start then return orig_start(ges) end
+        end
+        local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+        local fc = ok_f and FM.instance and FM.instance.file_chooser
+        if fc and type(fc.onGotoPage) == "function"
+                and type(fc.page_num) == "number" then
+            local ok = pcall(function() fc:onGotoPage(page or fc.page_num) end)
+            if ok then return true end
+        end
+        return false
+    end
+    local orig_start = hold_start.handler
+    hold_start.handler = function(ges)
+        local x = ges and ges.pos and ges.pos.x or -1
+        local dir
+        if x >= 0 and x < prev_end_x then
+            dir = "prev"
+        elseif next_x and x >= next_x then
+            dir = "next"
+        end
+        if dir then
+            local allowed = hasDir(dir)
+            local target = (dir == "prev") and 1 or nil
+            local jumped = false
+            if allowed then jumped = gotoPage(target) end
+            logger.info("wrHold: dir=" .. dir .. " x=" .. tostring(x)
+                .. " allowed=" .. tostring(allowed)
+                .. " jumped=" .. tostring(jumped))
+            if jumped then
+                handled = true
                 return true
             end
-            local orig_settings = hold_settings.handler
-            hold_settings.handler = function(ges)
-                if handled then
-                    handled = false -- already jumped on hold; swallow the release
-                    return true
-                end
-                if orig_settings then return orig_settings(ges) end
-                return true
-            end
-        end)
-        return orig_register(self, zones)
+            -- Nothing moved: do NOT swallow the release — SimpleUI's own
+            -- hold_release handler keeps its chance (this is what makes the
+            -- feature degrade to "jump on release" instead of "dead").
+            handled = false
+            if orig_start then return orig_start(ges) end
+            return true
+        end
+        handled = false
+        if orig_start then return orig_start(ges) end
+        return true
+    end
+    local orig_settings = hold_settings.handler
+    hold_settings.handler = function(ges)
+        if handled then
+            handled = false -- already jumped on hold; swallow the release
+            return true
+        end
+        if orig_settings then return orig_settings(ges) end
+        return true
     end
 end
 
---- Collapse the burst of repaint requests a dock transition produces.
--- Leaving a weread page hands the screen back to the FileManager, and several
--- independent modules ask for a repaint in the same instant: SimpleUI dirties
--- the title strip from three different call sites (screens/sui_titlebar.lua,
--- infra/sui_patches.lua x2), coverbrowser dirties the item list, and closing
--- the page dirties its own area. Their union is the whole screen, and because
--- the requests are spread over a few event-loop ticks the e-ink panel ends up
--- doing several full-screen-ish refreshes -> a visible flash.
---
--- We do not modify those upstream/plugin sources, so instead we collapse plain
--- "ui" repaints of the SAME widget+region that arrive within 0.6s of a weread
--- dock tap: only the first is issued, the rest are redundant (the final state
--- is identical). Scoped to the transition window, so nothing else is affected.
-local function installDirtyCoalesce()
-    local UIMgr = require("ui/uimanager")
-    if UIMgr._wr_dirty_coalesced then return end
-    UIMgr._wr_dirty_coalesced = true
-    -- Refreshtype may itself be a function returning (mode, region).
-    local function resolve(refreshtype, refreshregion)
-        if type(refreshtype) == "function" then
-            local ok, t, r = pcall(refreshtype)
-            if ok then return t, r end
-            return nil, refreshregion
-        end
-        return refreshtype, refreshregion
-    end
-    local function keyOf(widget, rtype, rregion)
-        local w
-        if type(widget) == "table" then
-            w = widget.name or widget.id or tostring(widget)
-        else
-            w = tostring(widget)
-        end
-        local reg = "-"
-        if type(rregion) == "table" and rregion.w and rregion.h then
-            reg = rregion.w .. "x" .. rregion.h .. "@"
-                .. (rregion.x or 0) .. "," .. (rregion.y or 0)
-        end
-        return w .. "|" .. tostring(rtype) .. "|" .. reg
-    end
-    local orig_set = UIMgr.setDirty
-    local recent = {}
-    UIMgr.setDirty = function(self, widget, refreshtype, refreshregion, ...)
-        local t = _G._wr_dock_transition_at
-        if t and (os.time() - t) <= 3 then
-            local rtype, rregion = resolve(refreshtype, refreshregion)
-            if rtype == "ui" or rtype == nil then
-                local k = keyOf(widget, rtype, rregion)
-                local now = os.clock()
-                if recent[k] and (now - recent[k]) < 0.6 then
-                    return -- already requested a moment ago; nothing new to paint
+--- SimpleUI's navpager arrows are internally inconsistent for the built-in
+--- homescreen: the arrow is lit from `_current_page/_total_pages`, while its tap
+--- path needs `onNextPage/onPrevPage` + a numeric `page_num`. The homescreen has
+--- the methods but no `page_num`, so the tap does nothing (it falls through to
+--- the invisible FileManager underneath). Wrap the two arrow taps: when the
+--- normal gate reports no direction, use the topmost fullscreen widget's own
+--- onNextPage/onPrevPage instead.
+local function rewriteNavpagerArrows(zones)
+    for _, z in ipairs(zones or {}) do
+        if z and (z.id == "navbar_pos_prev" or z.id == "navbar_pos_next") then
+            local is_prev = (z.id == "navbar_pos_prev")
+            local orig_h = z.handler
+            z.handler = function(ev)
+                local forward = false
+                local ok = pcall(function()
+                    local ok_cfg, Config = pcall(require, "infra/sui_config")
+                    local prev, nxt = false, false
+                    if ok_cfg and Config and Config.getNavpagerState then
+                        local ok_s, p, n = pcall(Config.getNavpagerState)
+                        if ok_s then prev, nxt = p, n end
+                    end
+                    -- Normal case: a direction exists -> keep SimpleUI's own
+                    -- handler (it pages the FM / our pages / custom screens).
+                    if (is_prev and prev) or ((not is_prev) and nxt) then
+                        forward = true
+                        return
+                    end
+                    local ok_ui, UIMgr = pcall(require, "ui/uimanager")
+                    if not (ok_ui and UIMgr) then return end
+                    local stack = UIMgr._window_stack or UIMgr.window_stack
+                    for i = #(stack or {}), 1, -1 do
+                        local w = stack[i] and stack[i].widget
+                        if w and w.covers_fullscreen then
+                            local fn = is_prev and "onPrevPage" or "onNextPage"
+                            local is_hs = (w.name == "homescreen")
+                                or w._current_page ~= nil
+                                or w._total_pages ~= nil
+                            if is_hs and type(w[fn]) == "function" then
+                                pcall(function() w[fn](w) end)
+                            end
+                            return
+                        end
+                    end
+                end)
+                if forward or not ok then
+                    if orig_h then return orig_h(ev) end
+                    return true
                 end
-                recent[k] = now
+                return true
             end
         end
-        return orig_set(self, widget, refreshtype, refreshregion, ...)
+    end
+end
+
+local function installNavpagerHoldPatch()
+    local ok_b, B = pcall(require, "screens/sui_bottombar")
+    if not ok_b or not B or type(B.registerTouchZones) ~= "function" then
+        return
+    end
+    if B._wr_navpager_hold_patched then return end
+    B._wr_navpager_hold_patched = true
+    local orig_register = B.registerTouchZones
+    B.registerTouchZones = function(plugin, w)
+        if not (w and type(w.registerTouchZones) == "function") then
+            return orig_register(plugin, w)
+        end
+        -- Temporarily intercept the widget's own registration so the zone
+        -- handlers can be rewritten before they are installed.
+        local orig_wreg = w.registerTouchZones
+        w.registerTouchZones = function(self, zones)
+            pcall(rewriteNavpagerHold, zones)
+            pcall(rewriteNavpagerArrows, zones)
+            local res = orig_wreg(self, zones)
+            -- Zones now exist on the widget: let the page take over individual
+            -- tabs (its family switch) or react to the registration.
+            if type(self.on_zones_registered) == "function" then
+                pcall(self.on_zones_registered, self, zones)
+            end
+            -- NOTE: nothing is stamped here. A previous iteration stamped a
+            -- global transition timestamp on every dock zone to feed a repaint
+            -- coalescer; that coalescer swallowed the repaint of the view being
+            -- switched to (the new view shares the old one's name/region), which
+            -- is what made tab switches look stuck. Both are gone.
+            -- Native navpager arrows: SimpleUI builds this page's bar while the
+            -- page is still being shown (not yet on the window stack), so its own
+            -- getNavpagerState() reads the PREVIOUS page and the arrows would
+            -- keep that page's state. Report this page's real state explicitly
+            -- after every zone registration — that also re-runs on every SimpleUI
+            -- bar rebuild, so the state can never go stale.
+            pcall(function()
+                if not (self.name == "weread_shelf" or self.name == "weread_stats") then return end
+                local ok_cfg, Config = pcall(require, "infra/sui_config")
+                if not (ok_cfg and Config and Config.isNavpagerEnabled
+                        and Config.isNavpagerEnabled()) then return end
+                local ok_b, B = pcall(require, "screens/sui_bottombar")
+                if not (ok_b and B and B.updateNavpagerArrows) then return end
+                local p, pn = self.page, self.page_num
+                local numeric = type(p) == "number" and type(pn) == "number"
+                local prev = numeric and p > 1 or false
+                local nxt = numeric and p < pn or false
+                B.updateNavpagerArrows(self, prev, nxt)
+                UIManager:setDirty(self, "ui")
+                logger.info("wrNav: " .. tostring(self.name)
+                    .. " page=" .. tostring(p) .. "/" .. tostring(pn)
+                    .. " prev=" .. tostring(prev) .. " next=" .. tostring(nxt))
+            end)
+            -- TEMP: dump the real zone list of our pages once per registration,
+            -- so the navpager layout (ids + rectangles) can be compared with what
+            -- we assume instead of being guessed.
+            pcall(function()
+                if not (self.name == "weread_shelf" or self.name == "weread_stats") then return end
+                local parts = {}
+                for id, tz in pairs(self._zones or {}) do
+                    local r = tz and tz.gs_range and tz.gs_range.range
+                    if r then
+                        parts[#parts + 1] = string.format("%s@%d,%d %dx%d", id,
+                            r.x or -1, r.y or -1, r.w or -1, r.h or -1)
+                    end
+                end
+                table.sort(parts)
+                logger.info("wrZoneTab: " .. tostring(self.name) .. " | "
+                    .. table.concat(parts, " | "))
+            end)
+            return res
+        end
+        local res = orig_register(plugin, w)
+        w.registerTouchZones = orig_wreg
+        return res
     end
 end
 
@@ -651,12 +787,20 @@ local function apply_fm()
     local ok_ui, UIManager = pcall(require, "ui/uimanager")
     if ok_ui and UIManager and UIManager.scheduleIn then
         UIManager:scheduleIn(1.5, function()
-            pcall(liftFMContent)
+            -- A/B switch: the 7px FM content lift was tuned against the OLD
+            -- self-drawn weread pages; both pages are natively hosted now, so it
+            -- may no longer be needed (see FM_CONTENT_LIFT).
+            if FM_CONTENT_LIFT then pcall(liftFMContent) end
             pcall(installMosaicMarginHook)
             pcall(installPagerSizePatch)
             pcall(installPagerTextPatch)
             pcall(installNavpagerHoldPatch)
-            pcall(installDirtyCoalesce)
+            -- (installDirtyCoalesce and installRepaintTrace are intentionally NOT
+            -- installed: the coalescer intercepted UIManager.setDirty globally and
+            -- dropped the repaint that a just-shown view needed, which is exactly the
+            -- "tab switch does nothing / UI looks stuck" symptom. Repaints must never
+            -- be swallowed; the switch flash is handled by the show-then-close ordering
+            -- and closeForNavigation instead.)
             pcall(function()
                 local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
                 local fm = ok_f and FM.instance
