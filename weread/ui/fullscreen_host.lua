@@ -20,7 +20,6 @@
 
 local Device = require("device")
 local Screen = Device.screen
-local UIManager = require("ui/uimanager")
 local logger = require("weread.lib.logger")
 
 local Host = {}
@@ -185,31 +184,16 @@ local function afterInject(w, ctx, match)
             back.hold_callback = function() end
         end
         -- SimpleUI builds the wrapped bar while the widget is still being
-        -- shown (not yet on the window stack), so its getNavpagerState() reads
-        -- the PREVIOUS page — our arrows then stay in that page's state (usually
-        -- both dimmed). Tell it our own paging state right after the show
-        -- completes.
-        pcall(function()
-            local ok_cfg2, Config2 = pcall(require, "infra/sui_config")
-            if not (ok_cfg2 and Config2 and Config2.isNavpagerEnabled
-                    and Config2.isNavpagerEnabled()) then return end
-            local ok_bb, Bottombar = pcall(require, "screens/sui_bottombar")
-            if not (ok_bb and Bottombar and Bottombar.updateNavpagerArrows) then return end
-            UIManager:scheduleIn(0.05, function()
-                pcall(function()
-                    local p, pn = w.page, w.page_num
-                    local numeric = type(p) == "number" and type(pn) == "number"
-                    local prev = numeric and p > 1 or false
-                    local nxt = numeric and p < pn or false
-                    Bottombar.updateNavpagerArrows(w, prev, nxt)
-                    UIManager:setDirty(w, "ui")
-                    -- TEMP: confirm what we reported
-                    logger.info("wrNav: page=" .. tostring(p) .. "/"
-                        .. tostring(pn) .. " prev=" .. tostring(prev)
-                        .. " next=" .. tostring(nxt))
-                end)
-            end)
-        end)
+        -- shown (not yet on the window stack), so its own getNavpagerState()
+        -- reads the PREVIOUS page. The registration wrapper in
+        -- ko_custom_patches reports this page's real state instead — inside
+        -- UIManager:show, i.e. BEFORE the first paint, so the corrected arrows
+        -- are already part of that first frame.
+        --
+        -- (A second, post-show report used to run here from scheduleIn(0.05)
+        -- together with a whole-content-region setDirty. It was redundant, and
+        -- that extra large e-ink refresh immediately after the switch is
+        -- exactly the flash only navpager mode showed. Removed.)
     end)
 end
 

@@ -126,6 +126,7 @@ local ReadStatsView = FocusManager:extend{
     on_prev = nil,
     on_next = nil,
     on_switch = nil,
+    on_latest = nil,   -- long-press on the dock's next arrow -> newest period
 }
 
 function ReadStatsView:faces()
@@ -796,7 +797,8 @@ local M = {}
 
 -- Show the statistics page.
 --   data      : normalized stats table from weread/lib/read_stats.lua
---   callbacks : { on_prev = fn, on_next = fn, on_switch = fn(mode) }
+--   callbacks : { on_prev = fn, on_next = fn, on_switch = fn(mode),
+--                 on_latest = fn, on_bookshelf = fn }
 -- Returns the widget instance.
 function M.show(data, callbacks)
     callbacks = callbacks or {}
@@ -807,6 +809,7 @@ function M.show(data, callbacks)
         on_next = callbacks.on_next,
         on_switch = callbacks.on_switch,
         on_bookshelf = callbacks.on_bookshelf,
+        on_latest = callbacks.on_latest,
     }
     UIManager:show(view)
     return view

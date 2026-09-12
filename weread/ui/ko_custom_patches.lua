@@ -751,7 +751,11 @@ local function installNavpagerHoldPatch()
                 local prev = numeric and p > 1 or false
                 local nxt = numeric and p < pn or false
                 B.updateNavpagerArrows(self, prev, nxt)
-                UIManager:setDirty(self, "ui")
+                -- NO setDirty here: this runs inside UIManager:show (before the
+                -- first paint), so the widget's own pending repaint already draws
+                -- the corrected arrows. That extra whole-widget setDirty was a
+                -- second large e-ink refresh right after every switch — the flash
+                -- only navpager mode showed.
                 logger.info("wrNav: " .. tostring(self.name)
                     .. " page=" .. tostring(p) .. "/" .. tostring(pn)
                     .. " prev=" .. tostring(prev) .. " next=" .. tostring(nxt))
