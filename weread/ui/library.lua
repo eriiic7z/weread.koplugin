@@ -256,7 +256,7 @@ function M:fetchVisibleShelfCovers(view, books, options)
             return
         end
 
-        local pid, read_fd = runner.run(function(_pid, child_write_fd)
+        local pid, read_fd = runner.run(function(_, child_write_fd)
             local ok, path = pcall(cache.thumbnailFromCached, cache, book)
             if not (ok and path) and online then
                 local downloaded, data = pcall(function()
@@ -371,6 +371,25 @@ function M:showShelfView(mode, keyword, old_view, options)
             end
         end
     end
+    -- Close the previous view FIRST, then show the new one, in this same tick —
+    -- that is the order SimpleUI itself uses for a tab navigation
+    -- (screens/sui_bottombar.lua: "Close the open screen first … Doing navigation
+    -- after avoids a redundant FM repaint while it is still covered"); weread's
+    -- own read_report.lua likewise closes old_view before showing the next page.
+    -- closeForNavigation() sets the same _navbar_closing_intentionally flag
+    -- SimpleUI's own navigate sets, so the closing page skips the redundant
+    -- "restore the FM tab" rebuild. Both calls land in one UIManager repaint
+    -- pass; showing first and closing afterwards caused a second pass over the
+    -- same (already covered) area — that was the flash.
+    if old_view then
+        pcall(function()
+            if old_view.closeForNavigation then
+                old_view:closeForNavigation()
+            else
+                UIManager:close(old_view)
+            end
+        end)
+    end
     local view
     view = LibraryView.show({
         mode = mode,
@@ -448,26 +467,6 @@ function M:showShelfView(mode, keyword, old_view, options)
             self:showShelfView(mode, keyword, view, next_options)
         end,
     })
-    -- Close the previous view only AFTER the new one is on top: UIManager:close
-    -- repaints what it uncovers synchronously, so closing first painted the FM
-    -- (or the previous mode's grid) just to cover it again — that double paint is
-    -- the flash seen when switching 书籍 / 公众号.
-    if old_view then
-        -- Defer the close to the next event-loop tick: this runs inside the old
-        -- view's own tap callback, and closing a widget while KOReader is still
-        -- dispatching that gesture can leave the input chain stuck (every later
-        -- tap then does nothing). Deferring is also flash-free: the new view is
-        -- already on top, so closing underneath repaints nothing visible.
-        UIManager:scheduleIn(0, function()
-            pcall(function()
-                if old_view.closeForNavigation then
-                    old_view:closeForNavigation()
-                else
-                    UIManager:close(old_view)
-                end
-            end)
-        end)
-    end
     if paged then self.shelf_view_pages[mode] = view.page end
     self.shelf_view = view
     if cover_mode and not skip_cover_fetch_once then

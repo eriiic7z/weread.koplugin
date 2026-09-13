@@ -254,6 +254,34 @@ function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
             return
         end
         logger.info("wrFlow: fetched, showing")
+        -- Close the page(s) we are replacing FIRST, then show the new one, in this
+        -- same tick — SimpleUI's own tab navigation does exactly that
+        -- (screens/sui_bottombar.lua: "Close the open screen first … Doing
+        -- navigation after avoids a redundant FM repaint while it is still
+        -- covered"), and weread's own read_report.lua also closed old_view before
+        -- showing the next page. closeForNavigation() carries the
+        -- _navbar_closing_intentionally flag so the closing page skips the
+        -- redundant "restore the FM tab" rebuild. Both land in ONE UIManager
+        -- repaint pass; showing first and closing afterwards forced a second pass
+        -- over the already covered area — that was the flash.
+        if old_view then
+            pcall(function()
+                if old_view.closeForNavigation then
+                    old_view:closeForNavigation()
+                else
+                    UIManager:close(old_view)
+                end
+            end)
+        end
+        if host_close then
+            pcall(function()
+                if host_close.closeForNavigation then
+                    host_close:closeForNavigation()
+                else
+                    UIManager:close(host_close)
+                end
+            end)
+        end
         local view
         view = ReadStatsView.show(data, {
             host_mode = host_mode,
@@ -272,54 +300,21 @@ function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
                 self:loadReadStats(mode, nil, view, host_mode)
             end,
             on_bookshelf = function()
-                -- Show the shelf first, then close this page: UIManager:close
-                -- repaints what it uncovers, so closing first painted the whole
-                -- FileManager just to cover it again (the visible flash). The
-                -- close itself is deferred one tick: this runs inside this page's
-                -- own tap callback, and closing a widget mid-gesture can leave
-                -- KOReader's input chain stuck (later taps do nothing).
+                -- Same native order (see loadReadStats): close this page first,
+                -- then show the shelf, in one tick — one repaint pass.
                 local closing = view
-                self:showBookshelf()
-                UIManager:scheduleIn(0, function()
+                if closing then
                     pcall(function()
-                        if closing and closing.closeForNavigation then
+                        if closing.closeForNavigation then
                             closing:closeForNavigation()
-                        elseif closing and closing.onClose then
+                        elseif closing.onClose then
                             closing:onClose()
                         end
                     end)
-                end)
+                end
+                self:showBookshelf()
             end,
         })
-        -- Close the previous page AFTER the new one is on top, and via
-        -- closeForNavigation when available: a plain UIManager:close makes
-        -- SimpleUI rebuild/repaint the FileManager under us (its "restore the FM
-        -- tab" wrapper), which is a full-screen repaint the user sees as a flash.
-        -- Deferred one tick too: a cached fetch can complete inside the tap that
-        -- triggered it, and closing a widget mid-gesture can stick the input
-        -- chain.
-        if old_view then
-            UIManager:scheduleIn(0, function()
-                pcall(function()
-                    if old_view.closeForNavigation then
-                        old_view:closeForNavigation()
-                    else
-                        UIManager:close(old_view)
-                    end
-                end)
-            end)
-        end
-        if host_close then
-            -- Flag it as part of this navigation so SimpleUI skips its
-            -- "restore the FM tab" rebuild (same flag its own navigate sets).
-            pcall(function()
-                if host_close.closeForNavigation then
-                    host_close:closeForNavigation()
-                else
-                    UIManager:close(host_close)
-                end
-            end)
-        end
     end)
 end
 
