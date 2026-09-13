@@ -46,7 +46,6 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
 local TitleMetrics = require("weread.ui.header_metrics")
 local FocusNav = require("weread.ui.focus_nav")
-local FullscreenHost = require("weread.ui.fullscreen_host")
 local I18n = require("weread.lib.i18n")
 local T = require("ffi/util").template
 
@@ -584,6 +583,10 @@ function ReadStatsView:init()
         -- SimpleUI hosts this page through its Bar Injection API: real top/bottom
         -- bars with every setting applied, its own top-edge menu gestures, bar
         -- taps, highlight and close handling. We only keep the frontlight gestures.
+        -- Looked up here rather than at file top: this file's load no longer
+        -- depends on the host module, and relocating the host later becomes a path
+        -- change only (no load-order coupling).
+        local FullscreenHost = require("weread.ui.fullscreen_host")
         FullscreenHost.install(self)
         self.native_bar = FullscreenHost.nativeBarAvailable()
         if self.native_bar then
