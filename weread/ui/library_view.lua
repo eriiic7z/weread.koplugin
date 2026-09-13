@@ -31,7 +31,7 @@ local I18n = require("weread.lib.i18n")
 local logger = require("weread.lib.logger")
 local T = require("ffi/util").template
 
-local function tr(text) return I18n.tr(text) end
+local function _(text) return I18n.tr(text) end
 
 --- Navpager mode: true when SimpleUI's bottom bar is in navpager mode.
 local function navpagerOn()
@@ -249,7 +249,7 @@ function CoverCell:init()
     end
     if not cover_content then
         cover_content = TextWidget:new{
-            text = self.cover_loading and tr("Cover loading") or tr("No cover"),
+            text = self.cover_loading and _("Cover loading") or _("No cover"),
             face = Font:getFace("cfont", 18),
             max_width = image_width,
         }
@@ -293,7 +293,7 @@ function CoverCell:init()
         self._cached_corner_size = corner_size
     end
     local cover = OverlapGroup:new(cover_layers)
-    local title = self.book.title or self.book.bookId or self.book.book_id or tr("Untitled")
+    local title = self.book.title or self.book.bookId or self.book.book_id or _("Untitled")
     -- book title below the cover: 15px bold (local-bookshelf mosaic title
     -- spec, FS_DETAIL); single line, long names truncate with ellipsis
     local title_widget = TextWidget:new{
@@ -410,7 +410,7 @@ function LibraryView:tabBar()
     local row = HorizontalGroup:new{}
     self._tab_buttons = {}
     local gap = HorizontalSpan:new{ width = Screen:scaleBySize(14) }
-    for _, tab in ipairs(tabs) do
+    for _i, tab in ipairs(tabs) do
         local active = tab.mode == self.mode
         local enabled = tab.mode ~= "public_account" or self.wp_enable
         local button = Button:new{
@@ -511,7 +511,7 @@ function LibraryView:refreshToolPageInfo()
         local total = math.max(1, self.page_count or 1)
         if total > 1 then
             local cur = math.max(1, math.min(self.page or 1, total))
-            text = T(tr("第%1/%2页"), cur, total)
+            text = T(_("第%1/%2页"), cur, total)
         end
     end
     pcall(function() w:setText(text) end)
@@ -521,7 +521,7 @@ function LibraryView:actionBar()
     -- actions as one compact group aligned right (books adds 筛选)
     -- (personal fork: localized literals; active state shown via bold)
     local search_active = self.keyword and self.keyword ~= ""
-    local filter_active = self.filter_label and self.filter_label ~= tr("All")
+    local filter_active = self.filter_label and self.filter_label ~= _("All")
     local sort_active = self.sort_label and self.sort_label ~= ""
     local actions = {}
     table.insert(actions, {
@@ -546,7 +546,7 @@ function LibraryView:actionBar()
     local row = HorizontalGroup:new{}
     self._action_secondary = {}
     self._action_primary = {}
-    for _, action in ipairs(actions) do
+    for _i, action in ipairs(actions) do
         if #row > 0 then row[#row + 1] = gap end
         local button = Button:new{
             text = action.text,
@@ -575,7 +575,7 @@ function LibraryView:itemStatus(book)
     if book.readUpdateTime and book.readUpdateTime > 0 then
         status = os.date("%Y-%m-%d", book.readUpdateTime)
     elseif book.finishReading == 1 then
-        status = tr("Done")
+        status = _("Done")
     end
     if book._cached then
         status = status ~= "" and ("✓  " .. status) or "✓"
@@ -617,7 +617,7 @@ function LibraryView:content()
     if #source == 0 then
         table.insert(content, VerticalSpan:new{ width = Size.padding.large })
         table.insert(content, TextWidget:new{
-            text = self.keyword and self.keyword ~= "" and tr("No shelf matches.") or tr("No items."),
+            text = self.keyword and self.keyword ~= "" and _("No shelf matches.") or _("No items."),
             face = Font:getFace("cfont", 20),
             max_width = self.content_width,
         })
@@ -687,7 +687,7 @@ function LibraryView:content()
         for index = first, last do
             local book = source[index]
             local row_opts = {
-                text = book.title or book.bookId or book.book_id or tr("Untitled"),
+                text = book.title or book.bookId or book.book_id or _("Untitled"),
                 status = self:itemStatus(book),
                 width = row_w,
                 font_size = pub and 19 or 20,
@@ -863,7 +863,7 @@ function LibraryView:init()
 
     self.title_bar = TitleBar:new{
         width = self.screen_w,
-        title = self.title or tr("WeRead"),
+        title = self.title or _("WeRead"),
         title_face = Font:getFace(TitleMetrics.FACE, TitleMetrics.FACE_SIZE),
         title_top_padding = Screen:scaleBySize(TitleMetrics.TOP_PADDING),
         align = "center",
@@ -964,7 +964,7 @@ function LibraryView:init()
          don't swallow pager taps)
     pcall(function()
         local area = Geom:new{ x = 0, y = 0, w = self.screen_w, h = scroll_h }
-        for _, ev in pairs(scroll.ges_events or {}) do
+        for _i, ev in pairs(scroll.ges_events or {}) do
             if type(ev) == "table" then
                 local gr = ev.range and ev or ev[1]
                 if gr and gr.range then gr.range = area end
@@ -974,21 +974,21 @@ function LibraryView:init()
     ]]
     -- One row holds the tabs plus the right-aligned actions (tool row).
     local tool_buttons = {}
-    for _, button in ipairs(self._tab_buttons) do
+    for _i, button in ipairs(self._tab_buttons) do
         tool_buttons[#tool_buttons + 1] = button
     end
-    for _, button in ipairs(self._action_primary) do
+    for _i, button in ipairs(self._action_primary) do
         tool_buttons[#tool_buttons + 1] = button
     end
     local rows = { tool_buttons }
-    for _, item_row in ipairs(self._focus_item_rows) do
+    for _i, item_row in ipairs(self._focus_item_rows) do
         rows[#rows + 1] = item_row
     end
     local outside_scroll = {}
-    for _, button in ipairs(tool_buttons) do outside_scroll[button] = true end
+    for _i, button in ipairs(tool_buttons) do outside_scroll[button] = true end
     if self._page_buttons then
         rows[#rows + 1] = self._page_buttons
-        for _, button in ipairs(self._page_buttons) do outside_scroll[button] = true end
+        for _i, button in ipairs(self._page_buttons) do outside_scroll[button] = true end
     end
     FocusNav.apply(self, rows, { scroll = scroll, outside_scroll = outside_scroll })
     FocusNav.initialFocus(self, 1, 1)
