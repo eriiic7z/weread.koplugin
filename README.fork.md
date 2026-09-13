@@ -83,4 +83,8 @@ navpager 关闭时相反：底部导航栏没有箭头，翻页与周期切换�
 
 ## 许可与出处
 
-fork 自 finlater/weread.koplugin（AGPL-3.0）；协议与上游代码归属原作者，界面定制为本分支变更。所有产品名称与商标归各自所有者。
+- **来源**：fork 自 `finlater/weread.koplugin`（GitHub: <https://github.com/finlater/weread.koplugin>），基于上游 **v1.4.2**（commit `2943080`），fork 起始于 **2026-09-08**。
+- **许可**：AGPL-3.0——协议与上游代码归属原作者，界面定制为本分支变更。
+- 所有产品名称与商标归各自所有者。
+
+（若上游仓库将来不可访问，以上署名与版本信息即为代码来源的溯源依据。）
