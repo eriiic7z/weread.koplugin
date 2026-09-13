@@ -520,6 +520,11 @@ local installFMToolbarPatch
 --- our pages used to fire on hold; this keeps the two identical.
 -- Arrow boundaries are read from SimpleUI's own navbar_pos_prev/next zones, so
 -- its geometry stays the source of truth.
+--- Armed by our own arrow-state report (below) and consumed by
+--- installRedundantRefreshSuppress(). Keyed by widget; stores a wall-clock second
+--- so a stale arm can never suppress a repaint much later.
+local wr_arrow_suppress_at = {}
+
 local function rewriteNavpagerHold(zones)
     local ok_cfg, Config = pcall(require, "infra/sui_config")
     if not (ok_cfg and Config and Config.isNavpagerEnabled
@@ -751,6 +756,12 @@ local function installNavpagerHoldPatch()
                 local prev = numeric and p > 1 or false
                 local nxt = numeric and p < pn or false
                 B.updateNavpagerArrows(self, prev, nxt)
+                -- Record what the arrows now show and arm the one-shot suppression
+                -- of SimpleUI's deferred whole-page refresh (see
+                -- installRedundantRefreshSuppress): that refresh re-draws exactly
+                -- this state and is the navpager-only switch flash.
+                self._wr_reported_arrows = { prev, nxt }
+                wr_arrow_suppress_at[self] = os.time()
                 -- NO setDirty here: this runs inside UIManager:show (before the
                 -- first paint), so the widget's own pending repaint already draws
                 -- the corrected arrows. That extra whole-widget setDirty was a
@@ -785,6 +796,102 @@ local function installNavpagerHoldPatch()
     end
 end
 
+--- SimpleUI's deferred navpager refresh passes a snapshot taken BEFORE our page
+--- entered the window stack — i.e. the PREVIOUS screen's paging state — and writes
+--- it over the arrows we already reported at registration. Correct the arguments
+--- for our two pages (same rule we apply in the registration report) so the
+--- native refresh becomes a no-op in content: the arrows stay right, and the
+--- one-shot suppression below can prove that its repaint paints nothing new.
+--- Wrapped defensively: any error leaves the original call untouched.
+local function installNavpagerStateCorrection()
+    local ok_b, B = pcall(require, "screens/sui_bottombar")
+    if not ok_b or not B or type(B.updateNavpagerArrows) ~= "function" then return end
+    if B._wr_state_corrected then return end
+    B._wr_state_corrected = true
+    local orig = B.updateNavpagerArrows
+    B.updateNavpagerArrows = function(widget, has_prev, has_next)
+        pcall(function()
+            if type(widget) ~= "table" then return end
+            local name = widget.name
+            if not (name == "weread_shelf" or name == "weread_stats") then return end
+            local p, pn = widget.page, widget.page_num
+            if type(p) ~= "number" or type(pn) ~= "number" then return end
+            has_prev, has_next = p > 1, p < pn
+        end)
+        return orig(widget, has_prev, has_next)
+    end
+    logger.info("wrNavState: corrected updateNavpagerArrows for our pages")
+end
+
+--- Suppress ONE provably redundant repaint: SimpleUI's injected-page show patch
+--- schedules, one tick after the show, `UIManager:setDirty(target2, "ui")` with
+--- no region (infra/sui_patches.lua, navpager block) — unconditionally, even when
+--- the arrow state it drew is the one we already reported before the first paint.
+--- Our two pages report their arrows at registration (before the paint), so that
+--- refresh re-draws identical content; on e-ink it is a second full-page refresh,
+--- i.e. the flash only navpager mode shows. SimpleUI 2.7.1 offers no descriptor
+--- flag to skip it and the guard (_navpager_rebuild_pending) is file-local, so the
+--- only precise interception point is this call.
+---
+--- Constraints (deliberately narrow, fail-open):
+---   * only our two pages (they are the only widgets that self-report arrows),
+---   * only ONE repaint per report (disarmed on use; also expires by wall clock),
+---   * only the whole-widget "ui" refresh with NO region (the shape SimpleUI uses),
+---   * only while the arrows still show exactly the state we recorded (i.e. the
+---     repaint would paint nothing new);
+---   * every check runs inside pcall — any error means "do not suppress";
+---   * it never suppresses anything else, and it never swallows a repaint it
+---     cannot prove redundant.
+--- Remove this if SimpleUI ever exposes a descriptor flag for the same thing.
+local function installRedundantRefreshSuppress()
+    local UIMgr = require("ui/uimanager")
+    if UIMgr._wr_suppress_installed then return end
+    UIMgr._wr_suppress_installed = true
+    local WINDOW_S = 2   -- the deferred refresh lands within the same second
+    local orig_set = UIMgr.setDirty
+    UIMgr.setDirty = function(self, widget, refreshtype, refreshregion, ...)
+        local skip = false
+        if type(widget) == "table" then
+            pcall(function()
+                local t = wr_arrow_suppress_at[widget]
+                if not t then return end
+                if os.time() - t > WINDOW_S then
+                    wr_arrow_suppress_at[widget] = nil   -- stale: drop it
+                    return
+                end
+                -- Other refreshes in the same burst (title band with a region,
+                -- type=nil, type=fn) must NOT consume the arm: the one we care
+                -- about is the LAST one, the plain whole-widget "ui" refresh.
+                if refreshtype ~= "ui" or refreshregion ~= nil then return end
+                wr_arrow_suppress_at[widget] = nil       -- consume on the candidate
+                local bar = widget._navbar_bar
+                local hg = bar and (bar._navpager_hg or bar[1])
+                local flags = widget._wr_reported_arrows
+                if not (hg and flags and hg[1] and hg[#hg]) then
+                    logger.info("wrNavSuppress: candidate rejected (no arrow cells)")
+                    return
+                end
+                if hg[1]._arrow_enabled ~= flags[1]
+                        or hg[#hg]._arrow_enabled ~= flags[2] then
+                    logger.info("wrNavSuppress: candidate rejected, arrows="
+                        .. tostring(hg[1]._arrow_enabled) .. ","
+                        .. tostring(hg[#hg]._arrow_enabled)
+                        .. " reported=" .. tostring(flags[1]) .. "," .. tostring(flags[2]))
+                    return
+                end
+                skip = true
+            end)
+        end
+        if skip then
+            logger.info("wrNavSuppress: skipped 1 redundant whole-page ui repaint"
+                .. " (arrows already correct)")
+            return
+        end
+        return orig_set(self, widget, refreshtype, refreshregion, ...)
+    end
+    logger.info("wrNavSuppress: installed (one-shot, our pages only, fail-open)")
+end
+
 local function apply_fm()
     installTitleFaceHook()
     installFMToolbarPatch()
@@ -799,6 +906,8 @@ local function apply_fm()
             pcall(installPagerSizePatch)
             pcall(installPagerTextPatch)
             pcall(installNavpagerHoldPatch)
+            pcall(installNavpagerStateCorrection)
+            pcall(installRedundantRefreshSuppress)
             -- (installDirtyCoalesce and installRepaintTrace are intentionally NOT
             -- installed: the coalescer intercepted UIManager.setDirty globally and
             -- dropped the repaint that a just-shown view needed, which is exactly the
