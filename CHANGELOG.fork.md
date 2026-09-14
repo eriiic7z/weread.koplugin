@@ -2,7 +2,7 @@
 
 本文件记录相对上游 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) v1.4.2 的定制变更，均位于 `custom` 分支。上游自身的变更见仓库根 [CHANGELOG.md](CHANGELOG.md)；fork 用法与边界见 [README.fork.md](README.fork.md)。
 
-## [Unreleased]
+## [1.4.2-fork.8] - 2026-09-14
 
 ### 新增
 
