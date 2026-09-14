@@ -460,6 +460,9 @@ function ReadStatsView:buildTabBar()
     local cell_w = math.floor((self.screen_w - 2 * side) / n)
     local row = HorizontalGroup:new{}
     self._tab_buttons = {}
+    -- Sizes follow SimpleUI's title-bar size preset (Default = previous values);
+    -- the card-matching side inset above is deliberately not scaled.
+    local us = TitleMetrics.uiScale()
     for _i, tab in ipairs(TABS) do
         local active = (tab.mode == self.data.mode)
         local button = Button:new{
@@ -473,8 +476,8 @@ function ReadStatsView:buildTabBar()
             -- fixed & tap highlights both square (bookshelf style)
             preselect = active,
             text_font_bold = active,
-            text_font_size = 18, -- tab labels two sizes smaller
-            padding_v = Screen:scaleBySize(1), -- bookshelf control-height ratio
+            text_font_size = math.floor(18 * us), -- tab labels two sizes smaller
+            padding_v = math.floor(Screen:scaleBySize(1) * us), -- bookshelf control-height ratio
             show_parent = self,
             callback = function() self:onSwitchMode(tab.mode) end,
         }
@@ -618,6 +621,15 @@ function ReadStatsView:init()
         self.key_events.Close = { { Device.input.group.Back } }
     end
 
+    -- Layout is built by buildLayout() so it can be re-run in place when
+    -- SimpleUI's title-bar size preset changes: the tab row reads its metrics
+    -- there and the scroll area follows from the row heights.
+    self:buildLayout()
+end
+
+--- Builds this page's layout tree. Called by init, and again by refreshUiScale()
+--- when SimpleUI's title-bar size preset changes.
+function ReadStatsView:buildLayout()
     local d = self.data
     -- Virtual pager state for SimpleUI's native navpager arrows: "page > 1"
     -- means a previous period exists, "page < page_num" a next one. The arrow
@@ -716,13 +728,33 @@ function ReadStatsView:init()
     if nav_row then
         table.insert(body, nav_row)
     end
+    self._ui_scale = TitleMetrics.uiScale()
 
-    self[1] = FrameContainer:new{
-        background = Blitbuffer.COLOR_WHITE,
-        bordersize = 0, padding = 0, margin = 0,
-        dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h },
-        body,
-    }
+    -- Keep the top-level widget's identity: when SimpleUI hosts this page it wraps
+    -- our first child and stores the top-bar offset on that object
+    -- (sui_patches.lua:2086 + wrapWithNavbar), so it must not be replaced.
+    local outer = self._navbar_inner or self[1]
+    if outer then
+        outer[1] = body
+        outer.dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h }
+        pcall(function() if outer.resetLayout then outer:resetLayout() end end)
+    else
+        self[1] = FrameContainer:new{
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = 0, padding = 0, margin = 0,
+            dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h },
+            body,
+        }
+    end
+end
+
+--- Re-runs the layout in place when SimpleUI's title-bar size preset changes.
+--- Fired by the patch layer from inside SimpleUI's own reapplyAll; a rebuild only
+--- happens when the preset really changed.
+function ReadStatsView:refreshUiScale()
+    if self._ui_scale == TitleMetrics.uiScale() then return end
+    self:buildLayout()
+    UIManager:setDirty(self, "ui")
 end
 
 --- Scrollbar appears/updates only after layout, so re-apply the light colour

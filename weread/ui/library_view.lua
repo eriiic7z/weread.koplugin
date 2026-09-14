@@ -408,7 +408,10 @@ function LibraryView:tabBar()
     }
     local row = HorizontalGroup:new{}
     self._tab_buttons = {}
-    local gap = HorizontalSpan:new{ width = Screen:scaleBySize(14) }
+    -- Sizes follow SimpleUI's title-bar size preset (Default = the previous
+    -- values); insets that must keep matching the separator are NOT scaled.
+    local us = TitleMetrics.uiScale()
+    local gap = HorizontalSpan:new{ width = math.floor(Screen:scaleBySize(14) * us) }
     for _i, tab in ipairs(tabs) do
         local active = tab.mode == self.mode
         local enabled = tab.mode ~= "public_account" or self.wp_enable
@@ -420,11 +423,11 @@ function LibraryView:tabBar()
             -- no background: KOReader forces ROUNDED corners on the tap
             -- highlight whenever a Button has a background, so leave it nil
             -- to get the square highlight (直角矩形)
-            text_font_size = 18,
+            text_font_size = math.floor(18 * us),
             text_font_bold = true,
             enabled = enabled,
-            padding_h = Screen:scaleBySize(6),
-            padding_v = Screen:scaleBySize(1),
+            padding_h = math.floor(Screen:scaleBySize(6) * us),
+            padding_v = math.floor(Screen:scaleBySize(1) * us),
             show_parent = self,
             callback = function()
                 if enabled and not active and self.on_switch then
@@ -437,12 +440,12 @@ function LibraryView:tabBar()
         local b_w = math.max(1, button:getSize().w)
         table.insert(row, VerticalGroup:new{
             align = "left",
-            VerticalSpan:new{ width = Screen:scaleBySize(3) }, -- keep tap highlight clear of the title separator
+            VerticalSpan:new{ width = math.floor(Screen:scaleBySize(3) * us) }, -- keep tap highlight clear of the title separator
             button,
             -- active underline: same 1px thickness as the bottom dock
             -- separator (active state kept via colour only); spaced below
             -- the button so the tap highlight never touches it
-            VerticalSpan:new{ width = Screen:scaleBySize(4) },
+            VerticalSpan:new{ width = math.floor(Screen:scaleBySize(4) * us) },
             LineWidget:new{
                 dimen = Geom:new{
                     w = b_w,
@@ -517,6 +520,7 @@ function LibraryView:refreshToolPageInfo()
 end
 
 function LibraryView:actionBar()
+    local us = TitleMetrics.uiScale()
     -- actions as one compact group aligned right (books adds 筛选)
     -- (personal fork: localized literals; active state shown via bold)
     local search_active = self.keyword and self.keyword ~= ""
@@ -541,7 +545,7 @@ function LibraryView:actionBar()
             cb = function() if self.on_filter then self.on_filter() end end,
         })
     end
-    local gap = HorizontalSpan:new{ width = Screen:scaleBySize(8) }
+    local gap = HorizontalSpan:new{ width = math.floor(Screen:scaleBySize(8) * us) }
     local row = HorizontalGroup:new{}
     self._action_secondary = {}
     self._action_primary = {}
@@ -550,9 +554,9 @@ function LibraryView:actionBar()
         local button = Button:new{
             text = action.text,
             radius = 0, margin = 0, bordersize = 0,
-            text_font_size = 16,
+            text_font_size = math.floor(16 * us),
             text_font_bold = action.bold == true,
-            padding_v = Screen:scaleBySize(1),
+            padding_v = math.floor(Screen:scaleBySize(1) * us),
             show_parent = self,
             callback = action.cb,
         }
@@ -746,9 +750,15 @@ function LibraryView:koPager()
             icon_height = icon_sz,
             bordersize = 0,
             enabled = enabled,
+            -- a hold must work even on a disabled arrow (first/prev at page 1): the
+            -- long press opens the pagination-bar settings window
+            allow_hold_when_disabled = true,
             show_parent = self,
             callback = cb,
         }
+        -- long-press (on release), on any of the four arrows, opens the native
+        -- pagination-bar settings window — same as the page number below
+        require("weread.ui.ko_custom_patches").hookPagerHoldToSettings(btn)
         -- layout footprint = the FM chevron button's (icon + its 2px padding),
         -- touch area grows beyond it
         local footprint = icon_sz + 2 * Screen:scaleBySize(2)
@@ -765,14 +775,45 @@ function LibraryView:koPager()
     local left = chev("chevron.left", cur > 1, function() jump(cur - 1) end)
     local right = chev("chevron.right", cur < total, function() jump(cur + 1) end)
     local last = chev("chevron.last", cur < total, function() jump(total) end)
-    local page_text = Button:new{
+    -- Tap opens KOReader's own page-number dialog: the FileManager pager uses this
+    -- same hold_input mechanism (menu.lua:832-848), with call_hold_input_on_tap so
+    -- a plain tap opens it (button.lua:88-89).
+    local page_text
+    page_text = Button:new{
         text = T("%1/%2", tostring(cur), tostring(total)),
         text_font_size = math.floor(14 * pscale),
         text_font_bold = false,
         bordersize = 0,
         enabled = true,
         show_parent = self,
+        call_hold_input_on_tap = true,
+        hold_input = {
+            title = _("Go to page"),
+            hint_func = function() return T(_("1 - %1"), total) end,
+            buttons = {
+                {
+                    {
+                        text = _("Cancel"),
+                        id = "close",
+                        callback = function() page_text:closeInputDialog() end,
+                    },
+                    {
+                        text = _("Go to page"),
+                        callback = function()
+                            local p = tonumber(page_text.input_dialog:getInputText())
+                            if p and p >= 1 and p <= total then
+                                jump(p)
+                                page_text:closeInputDialog()
+                            end
+                        end,
+                    },
+                },
+            },
+        },
     }
+    -- Long-press (on release) opens SimpleUI's own pagination-bar settings window;
+    -- the tap keeps the native page-number dialog configured above.
+    require("weread.ui.ko_custom_patches").hookPagerHoldToSettings(page_text)
     self._page_buttons = { first, left, right, last, page_text }
     local function sp() return HorizontalSpan:new{ width = gap } end
     -- Copy the FileManager pager row's height (measured live) so the three rows
@@ -852,7 +893,6 @@ function LibraryView:init()
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
     self.native_bar = FullscreenHost.nativeBarAvailable()
-    local top_gap, bottom_gap = 0, 0
     if self.native_bar then
         self:ensureBarDescriptors()
         -- BarInjection matches shown widgets by name.
@@ -881,6 +921,17 @@ function LibraryView:init()
         -- and the dock navigation; pass close_callback back here to restore X.
         show_parent = self,
     }
+    -- Layout is built by buildLayout() so it can be re-run in place when
+    -- SimpleUI's title-bar size preset changes: the rows read their metrics at
+    -- build time and every height derived from them (scroll area, cover cells,
+    -- rows per page) has to be recomputed together.
+    self:buildLayout()
+end
+
+--- Builds this page's layout tree: the header rows take TitleMetrics.uiScale()
+--- here, and the scroll area / cover cell height / rows per page follow from the
+--- row heights. Called by init, and again by refreshUiScale() on a preset change.
+function LibraryView:buildLayout()
     local tool = self:toolRow()
     -- title separator: mirrors the bottom dock divider (same thin light-grey
     -- line inset by cover_side_margin on both sides), replacing the built-in
@@ -896,6 +947,10 @@ function LibraryView:init()
         },
         HorizontalSpan:new{ width = self.cover_side_margin },
     }
+    -- Header band metrics (title row + separator + tool row). The title long-press
+    -- zone covers exactly this band, so its height is remembered here.
+    self._title_sep_h = title_sep:getSize().h
+    self._tool_row_h  = tool:getSize().h
     self:preparePagination()
     -- Navpager mode hands page turning to the native dock arrows (pre-migration
     -- behaviour), so the in-page pager row is hidden while it is on.
@@ -914,8 +969,8 @@ function LibraryView:init()
         end
     end
     self.layout_h = layout_h
-    self.top_gap = top_gap
-    self.bottom_gap = bottom_gap
+    -- always 0: the native bar already sits outside our content box
+    self.top_gap, self.bottom_gap = 0, 0
     -- The 8px gap below the pager existed only to clear the self-drawn dock;
     -- with the native bar there is nothing to clear, so drop it (the FM footer
     -- has no such gap either).
@@ -963,21 +1018,9 @@ function LibraryView:init()
         VerticalGroup:new{ align = "left", content },
     }
     -- ScrollableContainer registers full-SCREEN gesture ranges, and it sits
-    -- before the pager in the tree (propagation is children-first, ascending),
-    -- so it would swallow taps meant for the pager row. Clamp its ranges to
-    -- its own area (semantically correct anyway).
-    --[[ TEMP disabled for A/B test (was: clamp scroll gesture ranges so they
-         don't swallow pager taps)
-    pcall(function()
-        local area = Geom:new{ x = 0, y = 0, w = self.screen_w, h = scroll_h }
-        for _i, ev in pairs(scroll.ges_events or {}) do
-            if type(ev) == "table" then
-                local gr = ev.range and ev or ev[1]
-                if gr and gr.range then gr.range = area end
-            end
-        end
-    end)
-    ]]
+    -- before the pager in the tree (propagation is children-first, ascending).
+    -- The pager taps are handled by the pager's own widgets (native zones), so no
+    -- clamp is needed here.
     -- One row holds the tabs plus the right-aligned actions (tool row).
     local tool_buttons = {}
     for _i, button in ipairs(self._tab_buttons) do
@@ -1008,11 +1051,24 @@ function LibraryView:init()
             VerticalSpan:new{ width = pager_gap },
         },
     }
-    self[1] = FrameContainer:new{
-        bordersize = 0, padding = 0, margin = 0,
-        dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h },
-        panel,
-    }
+    -- Keep the top-level widget's identity. When SimpleUI hosts this page it wraps
+    -- our first child and stores the top-bar offset ON that object
+    -- (`widget._navbar_inner = widget[1]`, sui_patches.lua:2086, and
+    -- wrapWithNavbar sets inner.overlap_offset) — replacing either one drops the
+    -- offset and yanks the page up under the status bar.
+    local outer = self._navbar_inner or self[1]
+    if outer then
+        outer[1] = panel
+        outer.dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h }
+        pcall(function() if outer.resetLayout then outer:resetLayout() end end)
+    else
+        self[1] = FrameContainer:new{
+            bordersize = 0, padding = 0, margin = 0,
+            dimen = Geom:new{ x = 0, y = 0, w = self.screen_w, h = self.layout_h },
+            panel,
+        }
+    end
+    self._ui_scale = TitleMetrics.uiScale()
     -- Paging interface: the in-page pager and SimpleUI's navpager arrows both
     -- drive this (SimpleUI looks for page_num + onPrevPage/onNextPage/
     -- onGotoPage on the pageable widget).
@@ -1037,6 +1093,75 @@ end
 -- on the left edge, and two-finger north/south anywhere, adjust the
 -- frontlight with the same delta curve and on/off boundary as
 -- DeviceListener (calculateGestureDelta).
+--- Re-runs the layout in place when SimpleUI's title-bar size preset changes.
+--- Fired by the patch layer from inside SimpleUI's own reapplyAll (the same wheel
+--- that makes the local library update live). Only a really different scale is
+--- worth a rebuild, so ordinary reapplies cost nothing.
+function LibraryView:refreshUiScale()
+    if self._ui_scale == TitleMetrics.uiScale() then return end
+    self:buildLayout()
+    self:registerTitleHoldZones()   -- the band height may have changed with the row
+    UIManager:setDirty(self, "ui")
+end
+
+--- Long-press on the title band (title row, separator, tab/action row) opens
+--- SimpleUI's own "Title Bar" settings window — the same window the local library
+--- opens the same way, and meaningful here too because its Button Size drives our
+--- tab/action sizes (see TitleMetrics.uiScale). The row's buttons get the hold as
+--- well: a hold lands on the child widget first (widgetcontainer.lua:100-107), and
+--- their own native long-press is a no-op, so nothing is taken away. Called from
+--- onShow, because the band's top edge is SimpleUI's status-bar height, which only
+--- exists once this page has been injected.
+function LibraryView:registerTitleHoldZones()
+    if self.native_bar ~= true then return end
+    local ok = pcall(function()
+        local band_h = (self.title_bar and self.title_bar:getHeight() or 0)
+            + (self._title_sep_h or 0) + (self._tool_row_h or 0)
+        if band_h <= 0 then return end
+        local sh = Screen:getHeight()
+        local zone = {
+            ratio_x = 0,
+            ratio_y = (self._navbar_topbar_h or 0) / sh,
+            ratio_w = 1,
+            ratio_h = band_h / sh,
+        }
+        local function open_settings()
+            local enabled = true
+            pcall(function()
+                local Store = require("infra/sui_store")
+                enabled = Store:nilOrTrue("simpleui_topbar_settings_on_hold")
+            end)
+            if not enabled then return end
+            local P = require("weread.ui.ko_custom_patches")
+            if P.openTitleBarSettingsWindow then P.openTitleBarSettingsWindow() end
+        end
+        self:registerTouchZones({
+            {
+                id          = "wr_shelf_title_hold_start",
+                ges         = "hold",
+                screen_zone = zone,
+                handler     = function() return true end,
+            },
+            {
+                id          = "wr_shelf_title_hold_settings",
+                ges         = "hold_release",
+                screen_zone = zone,
+                handler     = function()
+                    open_settings()
+                    return true
+                end,
+            },
+        })
+        local function hook(btn)
+            if not (btn and btn.hold_callback ~= nil) then return end
+            btn.hold_callback = function() open_settings() end
+        end
+        for _, b in ipairs(self._tab_buttons or {}) do hook(b) end
+        for _, b in ipairs(self._action_primary or {}) do hook(b) end
+    end)
+    if not ok then logger.info("wrHold: shelf title hold zones failed") end
+end
+
 function LibraryView:onShow()
     logger.info("wrFlow: shelf onShow mode=" .. tostring(self.mode)
         .. " page=" .. tostring(self.page) .. "/" .. tostring(self.page_num))
@@ -1044,6 +1169,7 @@ function LibraryView:onShow()
     -- registered by SimpleUI itself for injected widgets, so only the fallback
     -- (non-native) path needs our own top zones.
     self:registerHostGestures(self.native_bar == true)
+    self:registerTitleHoldZones()
     UIManager:setDirty(self, function() return "ui", self.dimen end)
     return true
 end

@@ -266,6 +266,31 @@ local PAGER_FONT_SZ = 14
 --- Grow a button's tap (and hold) range to `touch` px, centred on the button,
 -- without touching its layout footprint or how it paints: GestureRange accepts
 -- a function, so the range is recomputed from the button's live dimen.
+--- Long-press on a pager control opens SimpleUI's pagination-bar settings window
+--- on RELEASE, like every other hold menu (SimpleUI's own bar zones fire on
+--- hold_release). KOReader's Button has no release callback, so the press only
+--- marks the button and its release handler acts (button.lua:548-575). Setting
+--- hold_callback also suppresses the Button's hold_input on a hold, while a plain
+--- TAP still opens the native page-number dialog (call_hold_input_on_tap,
+--- button.lua:88-89).
+local function hookPagerHoldToSettings(btn)
+    if not (btn and type(btn.onHoldReleaseSelectButton) == "function") then return end
+    if btn._wr_hold_release_hooked then return end
+    btn._wr_hold_release_hooked = true
+    -- KOReader calls this bare (`self.hold_callback()`, button.lua:555), so it must
+    -- not take a self parameter — capture the button instead.
+    btn.hold_callback = function() btn._wr_hold_pending = true end
+    local orig_release = btn.onHoldReleaseSelectButton
+    btn.onHoldReleaseSelectButton = function(self, ...)
+        local pending = self._wr_hold_pending
+        self._wr_hold_pending = nil
+        local res
+        if orig_release then res = orig_release(self, ...) end
+        if pending then M.openPaginationBarSettingsWindow() end
+        return res
+    end
+end
+
 local function widenTouchRange(btn, touch)
     if not (btn and btn.ges_events and touch) then return end
     for _, seq in pairs(btn.ges_events) do
@@ -420,6 +445,19 @@ local function installPagerTextPatch()
             if self.page_info_text and self.page_num and self.page_num >= 1 then
                 self.page_info_text:setText(
                     tostring(self.page or 1) .. "/" .. tostring(self.page_num))
+            end
+            -- Long-press (on release) on the page number or on any of the four
+            -- arrows opens SimpleUI's own pagination-bar settings window. The tap
+            -- keeps KOReader's own page-number dialog: call_hold_input_on_tap makes
+            -- the Button use hold_input for taps (button.lua:88-89), while
+            -- hold_callback outranks it for a hold (button.lua:554-559).
+            if not self._wr_pager_hold_hooked then
+                self._wr_pager_hold_hooked = true
+                M.hookPagerHoldToSettings(self.page_info_text)
+                M.hookPagerHoldToSettings(self.page_info_left_chev)
+                M.hookPagerHoldToSettings(self.page_info_right_chev)
+                M.hookPagerHoldToSettings(self.page_info_first_chev)
+                M.hookPagerHoldToSettings(self.page_info_last_chev)
             end
             -- HorizontalGroup caches its offsets; without this the new spacer
             -- width / shorter text never reflow
@@ -777,9 +815,10 @@ local function installNavpagerHoldPatch()
                     .. " page=" .. tostring(p) .. "/" .. tostring(pn)
                     .. " prev=" .. tostring(prev) .. " next=" .. tostring(nxt))
             end)
-            -- TEMP: dump the real zone list of our pages once per registration,
-            -- so the navpager layout (ids + rectangles) can be compared with what
-            -- we assume instead of being guessed.
+            -- Diagnostic (kept on purpose, see AGENTS.md 日志自查线索): dump the
+            -- real zone list of our pages once per registration, so the navpager
+            -- layout (ids + rectangles) can be compared with what we assume
+            -- instead of being guessed.
             pcall(function()
                 if not (self.name == "weread_shelf" or self.name == "weread_stats") then return end
                 local parts = {}
@@ -898,6 +937,32 @@ local function installRedundantRefreshSuppress()
     logger.info("wrNavSuppress: installed (one-shot, our pages only, fail-open)")
 end
 
+local function installUiScaleRefreshHook()
+    local ok_tb, TB = pcall(require, "screens/sui_titlebar")
+    if not (ok_tb and TB and type(TB.reapplyAll) == "function") then return end
+    if TB._wr_ui_scale_hooked then return end
+    TB._wr_ui_scale_hooked = true
+    -- SimpleUI re-applies the title-bar size preset to every live widget through
+    -- this one call (Button Size -> _reapplyAllTitlebars -> reapplyAll,
+    -- sui_menu.lua:1770-1773). The local library updates live because that pass
+    -- re-runs its layout; our pages own their header rows, so they need the same
+    -- moment. The pages themselves no-op unless the preset really changed.
+    local orig = TB.reapplyAll
+    TB.reapplyAll = function(fm_self, window_stack, ...)
+        local res = orig(fm_self, window_stack, ...)
+        pcall(function()
+            for _, entry in ipairs(window_stack or {}) do
+                local w = entry and entry.widget
+                if w and type(w.refreshUiScale) == "function" then
+                    w:refreshUiScale()
+                end
+            end
+        end)
+        return res
+    end
+    logger.info("wrSizeHook: titlebar.reapplyAll wrapped (hosted pages refresh live)")
+end
+
 --- Opens SimpleUI's own "Title Bar" settings window — the same one its menu
 --- entry opens. Mirrors how SimpleUI opens the top-bar window
 --- (screens/sui_topbar.lua: _showTopbarSettingsWindow), but with
@@ -917,8 +982,17 @@ local function openTitleBarSettingsWindow()
             local Config = require("infra/sui_config")
             navpager = Config.isNavpagerEnabled and Config.isNavpagerEnabled() or false
         end)
+        local win_title = "Title Bar"
         local function buildRoot(ctx)
             local ctx_menu = ST.makeCtxMenu(ctx)
+            -- The window title reuses SimpleUI's own localised label for this bar:
+            -- its menu item already carries the translation, so the title follows
+            -- the UI language without us duplicating any string.
+            pcall(function()
+                local bars = plugin.makeBarsMenuItems and plugin.makeBarsMenuItems(ctx_menu)
+                local entry = bars and bars[3]   -- Status / Navigation / Title Bar (sui_menu.lua:2770-2774)
+                if entry and entry.text and entry.text ~= "" then win_title = entry.text end
+            end)
             return ST.MenuTable{
                 items          = plugin._makeTitleBarMenu(ctx_menu),
                 inner_w        = ctx.inner_w,
@@ -934,7 +1008,7 @@ local function openTitleBarSettingsWindow()
         end
         local win = ST:new{
             name             = "wr_title_settings",
-            title            = "Title Bar",
+            title            = function() return win_title end,
             screens          = ST.makeSettingsScreens(buildRoot),
             navpager_mode    = navpager,
             position         = "bottom",
@@ -950,6 +1024,72 @@ end
 --- (widgetcontainer.lua:100-107) and SimpleUI's own button holds are no-ops (its
 --- back button's hold = "go to page 1"), so overriding them would remove native
 --- behaviour. Gated by the same key SimpleUI uses for its own top-bar hold.
+--- Opens SimpleUI's own "Pagination Bar" settings menu in its settings window —
+--- the same items its main menu shows under Bars ▸ Pagination Bar. The bar menu
+--- builder is exposed on the plugin (plugin.makeBarsMenuItems, sui_menu.lua:2786)
+--- and returns the bars in a fixed order (sui_menu.lua:2770-2784), so we take its
+--- Pagination Bar entry and hand that entry's own sub-items to the window: the
+--- menu content stays SimpleUI's, we only open the window.
+local function openPaginationBarSettingsWindow()
+    pcall(function()
+        local ok_win, Win = pcall(require, "engines/sui_window")
+        local ok_ui, UI = pcall(require, "infra/sui_core")
+        local plugin = ok_ui and UI and UI.getLivePlugin and UI.getLivePlugin()
+        if not (ok_win and Win and plugin) then return end
+        if not plugin.makeBarsMenuItems and plugin.addToMainMenu then
+            plugin:addToMainMenu({})
+        end
+        if not plugin.makeBarsMenuItems then return end
+        local navpager = false
+        pcall(function()
+            local Config = require("infra/sui_config")
+            navpager = Config.isNavpagerEnabled and Config.isNavpagerEnabled() or false
+        end)
+        local win_title = "Pagination Bar"
+        local function buildRoot(ctx)
+            local ctx_menu = Win.makeCtxMenu(ctx)
+            local bars = plugin.makeBarsMenuItems(ctx_menu) or {}
+            local tx = rawget(_G, "_")   -- KOReader installs _; absent in bare tests
+            local want = tx and tx("Pagination Bar") or nil
+            local entry
+            if want then
+                for _, it in ipairs(bars) do
+                    if it.text == want then entry = it break end
+                end
+            end
+            if not entry then entry = bars[4] end -- …, Title Bar, Pagination Bar, …
+            -- Title from SimpleUI's own localised label for this bar
+            if entry and entry.text and entry.text ~= "" then win_title = entry.text end
+            local items = {}
+            if entry and type(entry.sub_item_table_func) == "function" then
+                local ok_sub, sub = pcall(entry.sub_item_table_func)
+                if ok_sub and type(sub) == "table" then items = sub end
+            end
+            return Win.MenuTable{
+                items          = items,
+                inner_w        = ctx.inner_w,
+                repaint        = function() ctx.repaint() end,
+                lock_overlay   = ctx.lockOverlay,
+                unlock_overlay = ctx.unlockOverlay,
+                push_stack     = function(id, params)
+                    if type(id) == "string" then ctx.push(id, params)
+                    else ctx.push("nested_menu", params) end
+                end,
+                on_close       = function() end,
+            }
+        end
+        local win = Win:new{
+            name             = "wr_pager_settings",
+            title            = function() return win_title end,
+            screens          = Win.makeSettingsScreens(buildRoot),
+            navpager_mode    = navpager,
+            position         = "bottom",
+            has_settings_btn = true,
+        }
+        win:show()
+    end)
+end
+
 local function registerTitleHoldZones(fm_self, band_y, band_h)
     if not (fm_self and fm_self.registerTouchZones and band_h and band_h > 0) then return end
     local sh = Screen:getHeight()
@@ -988,6 +1128,8 @@ end
 local function apply_fm()
     installTitleFaceHook()
     installFMToolbarPatch()
+    -- no timer: the preset hook must be in place before the user can change it
+    pcall(installUiScaleRefreshHook)
     local ok_ui, UIManager = pcall(require, "ui/uimanager")
     if ok_ui and UIManager and UIManager.scheduleIn then
         UIManager:scheduleIn(1.5, function()
@@ -1130,14 +1272,7 @@ layoutFMToolbar = function(fm_self)
     -- previous values exactly (47 / 14 / 29 px on a KPW4) while the other two
     -- presets become effective. SIDE stays fixed on purpose — it is what keeps
     -- this row aligned with the title separator above it.
-    local size_scale = 1
-    pcall(function()
-        local ok_st, ST = pcall(require, "screens/sui_titlebar")
-        if ok_st and ST and type(ST.getSizeScale) == "function" then
-            local ok_s, sc = pcall(ST.getSizeScale)
-            if ok_s and tonumber(sc) then size_scale = tonumber(sc) end
-        end
-    end)
+    local size_scale = TitleMetrics.uiScale()
     local glyph = math.floor(Screen:scaleBySize(FM_HDR.ICON_PX) * size_scale)
     local box   = glyph + math.floor(Screen:scaleBySize(FM_HDR.ICON_PAD) * size_scale)
     local gap   = math.floor(Screen:scaleBySize(FM_HDR.ICON_GAP_X) * size_scale)
@@ -1349,6 +1484,16 @@ end
 -- ---------------------------------------------------------------------------
 M.ensure = ensure          -- veil only (safe to call repeatedly)
 M.apply = apply_fm         -- FM visuals only
+--- Opened by long-pressing a bar: the FM title bar (see registerTitleHoldZones)
+--- and the bookshelf page's title band (weread/ui/library_view.lua). Moves to
+--- fullscreen_host.lua when the shell plugin is split out of this plugin.
+M.openTitleBarSettingsWindow = openTitleBarSettingsWindow
+--- Opened by long-pressing a pager row's page number (non-navpager mode), on the
+--- local library's pager and on the bookshelf's own pager.
+M.openPaginationBarSettingsWindow = openPaginationBarSettingsWindow
+--- Wires long-press (on release) of a pager control to that window; used by both
+--- the local library's pager and the bookshelf's own pager.
+M.hookPagerHoldToSettings = hookPagerHoldToSettings
 function M.install()       -- both, used by WeReadPlugin:init()
     ensure()
     apply_fm()

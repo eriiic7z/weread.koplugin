@@ -20,7 +20,7 @@
 
 local M = {
     FACE      = "smalltfont",
-    FACE_SIZE = 26,
+    FACE_SIZE = 28,   -- title font size, shared by all three page titles
 
     TOP_PADDING    = 0, -- title bar top padding, identical on all three pages
                        -- (the FileManager title sits at the content top; the
@@ -67,6 +67,24 @@ function M.pagerScale()
         local Store = require("infra/sui_store")
         local key = Store:readSetting("simpleui_bar_pagination_size") or "s"
         factor = M.PAGER_SCALE[key] or 1
+    end)
+    return factor
+end
+
+--- Factor for SimpleUI's title-bar size preset (Compact / Default / Large =
+--- 0.75 / 1.0 / 1.3), used by everything that lives in a page header: the FM
+--- toolbar row, the shelf's tab/action rows and the stats tab row. Read lazily and
+--- pcall-guarded: unavailable → 1.0 (the values these controls always had).
+--- Alignment constants (side insets, separator/underline thickness) deliberately
+--- do NOT go through this factor — they must keep matching the separator.
+function M.uiScale()
+    local factor = 1
+    pcall(function()
+        local ST = require("screens/sui_titlebar")
+        if ST and type(ST.getSizeScale) == "function" then
+            local ok, v = pcall(ST.getSizeScale)
+            if ok and tonumber(v) then factor = tonumber(v) end
+        end
     end)
     return factor
 end
