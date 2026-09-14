@@ -47,6 +47,28 @@ local M = {
     -- reference every pager/period row must match (it measures 52px on the
     -- reference device = 29 design units, incl. KOReader's Size.padding.button).
     PAGER_ROW_H = 29,
+
+    -- Pager size presets. SimpleUI's own setting (simpleui_bar_pagination_size)
+    -- is mapped to a factor applied to THIS fork's baselines, so:
+    --   * "s" (the preset most devices sit on) = 1.0 = exactly the values these
+    --     pagers have always used (no visual change);
+    --   * the FM pager (which we patch) and the in-page pagers use the same
+    --     factor, so they stay equal in every preset;
+    --   * each element keeps its own baseline (pager icon 18 / pager text 14 /
+    --     period-row text 16 / spacer 21) and just scales by the factor.
+    PAGER_SCALE = { xs = 0.75, s = 1.0, m = 1.3 },
 }
+
+--- Factor for the current SimpleUI pagination preset. Lazily read (never at load
+--- time) and pcall-guarded: unavailable → 1.0, i.e. the previous hard-coded values.
+function M.pagerScale()
+    local factor = 1
+    pcall(function()
+        local Store = require("infra/sui_store")
+        local key = Store:readSetting("simpleui_bar_pagination_size") or "s"
+        factor = M.PAGER_SCALE[key] or 1
+    end)
+    return factor
+end
 
 return M

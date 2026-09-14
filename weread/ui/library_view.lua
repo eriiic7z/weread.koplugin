@@ -726,7 +726,10 @@ function LibraryView:pageBar()
 end
 
 function LibraryView:koPager()
-    local icon_sz = Screen:scaleBySize(18)
+    -- Baselines stay the values these pagers have always used; SimpleUI's pagination
+    -- preset scales them (s = 1.0, so the default preset is pixel-identical).
+    local pscale = TitleMetrics.pagerScale()
+    local icon_sz = math.floor(Screen:scaleBySize(18) * pscale)
     local gap = Screen:scaleBySize(21) -- same as the FM pager spacer
     local total = math.max(1, self.page_count or 1)
     local cur = math.max(1, math.min(self.page or 1, total))
@@ -764,7 +767,7 @@ function LibraryView:koPager()
     local last = chev("chevron.last", cur < total, function() jump(total) end)
     local page_text = Button:new{
         text = T("%1/%2", tostring(cur), tostring(total)),
-        text_font_size = 14,
+        text_font_size = math.floor(14 * pscale),
         text_font_bold = false,
         bordersize = 0,
         enabled = true,

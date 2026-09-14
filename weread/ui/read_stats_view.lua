@@ -546,9 +546,11 @@ function ReadStatsView:buildNavRow()
         or Screen:scaleBySize(TitleMetrics.PAGER_ROW_H)
     -- bookshelf rule: button height = text line + small vertical padding
     local pad_v = Screen:scaleBySize(1)
+    -- Same pagination preset factor as the pager rows (s = 1.0 = previous value).
+    local pscale = TitleMetrics.pagerScale()
     local function mk(text, enabled, cb)
         return Button:new{
-            text = text, text_font_size = 16, text_font_bold = false,
+            text = text, text_font_size = math.floor(16 * pscale), text_font_bold = false,
             padding_v = pad_v, radius = 0, margin = 0, bordersize = 0,
             show_parent = self, enabled = enabled, callback = cb,
         }

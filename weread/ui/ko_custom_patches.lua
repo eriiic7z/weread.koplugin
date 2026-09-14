@@ -297,6 +297,12 @@ local function installPagerSizePatch()
         local res = orig_resize(widget, icon_size)
         pcall(function()
             if not widget then return end
+            -- SimpleUI's pagination preset scales OUR baselines (s = 1.0 keeps the
+            -- values this pager has always had); the in-page pagers use the same
+            -- factor, so the two stay equal in every preset.
+            local pscale = TitleMetrics.pagerScale()
+            local icon_px = math.floor(Screen:scaleBySize(PAGER_ICON_SZ) * pscale)
+            local font_px = math.floor(PAGER_FONT_SZ * pscale)
             local names = {
                 "page_info_left_chev", "page_info_right_chev",
                 "page_info_first_chev", "page_info_last_chev",
@@ -304,8 +310,8 @@ local function installPagerSizePatch()
             for _, n in ipairs(names) do
                 local btn = widget[n]
                 if btn and btn.init then
-                    btn.icon_width = Screen:scaleBySize(PAGER_ICON_SZ)
-                    btn.icon_height = Screen:scaleBySize(PAGER_ICON_SZ)
+                    btn.icon_width = icon_px
+                    btn.icon_height = icon_px
                     btn:init()
                 end
             end
@@ -316,14 +322,14 @@ local function installPagerSizePatch()
             end
             local txt = widget.page_info_text
             if txt and txt.init then
-                txt.text_font_size = PAGER_FONT_SZ
+                txt.text_font_size = font_px
                 txt:init()
             end
         end)
         return res
     end
-    logger.info("wrFmPatch: pager size patch installed (icon " .. PAGER_ICON_SZ
-        .. " / font " .. PAGER_FONT_SZ .. ", unconditional)")
+    logger.info("wrFmPatch: pager size patch installed (baseline icon " .. PAGER_ICON_SZ
+        .. " / font " .. PAGER_FONT_SZ .. " scaled by the SimpleUI pagination preset)")
 
     -- apply to the currently live FM pager as well
     pcall(function()
@@ -892,6 +898,93 @@ local function installRedundantRefreshSuppress()
     logger.info("wrNavSuppress: installed (one-shot, our pages only, fail-open)")
 end
 
+--- Opens SimpleUI's own "Title Bar" settings window — the same one its menu
+--- entry opens. Mirrors how SimpleUI opens the top-bar window
+--- (screens/sui_topbar.lua: _showTopbarSettingsWindow), but with
+--- plugin._makeTitleBarMenu instead of _makeTopbarMenu.
+local function openTitleBarSettingsWindow()
+    pcall(function()
+        local ok_st, ST = pcall(require, "engines/sui_window")
+        local ok_ui, UI = pcall(require, "infra/sui_core")
+        local plugin = ok_ui and UI and UI.getLivePlugin and UI.getLivePlugin()
+        if not (ok_st and ST and plugin) then return end
+        if not plugin._makeTitleBarMenu and plugin.addToMainMenu then
+            plugin:addToMainMenu({})
+        end
+        if not plugin._makeTitleBarMenu then return end
+        local navpager = false
+        pcall(function()
+            local Config = require("infra/sui_config")
+            navpager = Config.isNavpagerEnabled and Config.isNavpagerEnabled() or false
+        end)
+        local function buildRoot(ctx)
+            local ctx_menu = ST.makeCtxMenu(ctx)
+            return ST.MenuTable{
+                items          = plugin._makeTitleBarMenu(ctx_menu),
+                inner_w        = ctx.inner_w,
+                repaint        = function() ctx.repaint() end,
+                lock_overlay   = ctx.lockOverlay,
+                unlock_overlay = ctx.unlockOverlay,
+                push_stack     = function(id, params)
+                    if type(id) == "string" then ctx.push(id, params)
+                    else ctx.push("nested_menu", params) end
+                end,
+                on_close       = function() end,
+            }
+        end
+        local win = ST:new{
+            name             = "wr_title_settings",
+            title            = "Title Bar",
+            screens          = ST.makeSettingsScreens(buildRoot),
+            navpager_mode    = navpager,
+            position         = "bottom",
+            has_settings_btn = true,
+        }
+        win:show()
+    end)
+end
+
+--- Long-press on the FM title bar (the title row and its empty areas) opens that
+--- window, matching SimpleUI's "hold a bar to open its settings" habit. Buttons are
+--- deliberately NOT touched: KOReader delivers a hold to the child widget first
+--- (widgetcontainer.lua:100-107) and SimpleUI's own button holds are no-ops (its
+--- back button's hold = "go to page 1"), so overriding them would remove native
+--- behaviour. Gated by the same key SimpleUI uses for its own top-bar hold.
+local function registerTitleHoldZones(fm_self, band_y, band_h)
+    if not (fm_self and fm_self.registerTouchZones and band_h and band_h > 0) then return end
+    local sh = Screen:getHeight()
+    local zone = {
+        ratio_x = 0,
+        ratio_y = math.max(0, band_y) / sh,
+        ratio_w = 1,
+        ratio_h = band_h / sh,
+    }
+    pcall(function()
+        fm_self:registerTouchZones({
+            {
+                id          = "wr_title_hold_start",
+                ges         = "hold",
+                screen_zone = zone,
+                handler     = function() return true end,
+            },
+            {
+                id          = "wr_title_hold_settings",
+                ges         = "hold_release",
+                screen_zone = zone,
+                handler     = function()
+                    local enabled = true
+                    pcall(function()
+                        local Store = require("infra/sui_store")
+                        enabled = Store:nilOrTrue("simpleui_topbar_settings_on_hold")
+                    end)
+                    if enabled then openTitleBarSettingsWindow() end
+                    return true
+                end,
+            },
+        })
+    end)
+end
+
 local function apply_fm()
     installTitleFaceHook()
     installFMToolbarPatch()
@@ -1031,9 +1124,23 @@ layoutFMToolbar = function(fm_self)
     if not tb or fm_toolbar_laying_out then return end
     fm_toolbar_laying_out = true
     local sw    = Screen:getWidth()
-    local glyph = Screen:scaleBySize(FM_HDR.ICON_PX)
-    local box   = glyph + Screen:scaleBySize(FM_HDR.ICON_PAD)
-    local gap   = Screen:scaleBySize(FM_HDR.ICON_GAP_X)
+    -- Follow SimpleUI's own title-bar size preset (Compact / Default / Large =
+    -- 0.75 / 1.0 / 1.3) instead of pinning one size: the glyph, its invisible pad
+    -- and the inter-icon gap scale together, so the Default preset reproduces the
+    -- previous values exactly (47 / 14 / 29 px on a KPW4) while the other two
+    -- presets become effective. SIDE stays fixed on purpose — it is what keeps
+    -- this row aligned with the title separator above it.
+    local size_scale = 1
+    pcall(function()
+        local ok_st, ST = pcall(require, "screens/sui_titlebar")
+        if ok_st and ST and type(ST.getSizeScale) == "function" then
+            local ok_s, sc = pcall(ST.getSizeScale)
+            if ok_s and tonumber(sc) then size_scale = tonumber(sc) end
+        end
+    end)
+    local glyph = math.floor(Screen:scaleBySize(FM_HDR.ICON_PX) * size_scale)
+    local box   = glyph + math.floor(Screen:scaleBySize(FM_HDR.ICON_PAD) * size_scale)
+    local gap   = math.floor(Screen:scaleBySize(FM_HDR.ICON_GAP_X) * size_scale)
     local side  = Screen:scaleBySize(FM_HDR.SIDE)
 
     local ok = pcall(function()
@@ -1081,6 +1188,13 @@ layoutFMToolbar = function(fm_self)
         table.sort(rights, by_x)
 
         local toolbar_touch = Screen:scaleBySize(TitleMetrics.TOUCH)
+        --- Long-press on a toolbar button opens the same Title Bar settings window
+        --- as the band long-press (SimpleUI's own button holds are no-ops, and the
+        --- back button's "hold → page 1" is intentionally replaced by this).
+        local function hookButtonHold(w)
+            if not (w and w.hold_callback ~= nil) then return end
+            w.hold_callback = function() openTitleBarSettingsWindow() end
+        end
         for i, w in ipairs(lefts) do
             shrinkFMButton(w, box, glyph)
             w.overlap_align = nil
@@ -1088,6 +1202,7 @@ layoutFMToolbar = function(fm_self)
             w._wr_y = y
             forcePaintAt(w, tb)
             widenTouchRange(w, toolbar_touch)
+            hookButtonHold(w)
         end
         local total = #rights * box + math.max(0, #rights - 1) * gap
         local rx0   = math.max(side, sw - side - total)
@@ -1098,6 +1213,7 @@ layoutFMToolbar = function(fm_self)
             w._wr_y = y
             forcePaintAt(w, tb)
             widenTouchRange(w, toolbar_touch)
+            hookButtonHold(w)
         end
 
         -- subtitle (folder path) shares the toolbar row, vertically centred
@@ -1188,6 +1304,18 @@ layoutFMToolbar = function(fm_self)
         pcall(function()
             if fm_self._recalculateDimen then fm_self:_recalculateDimen() end
         end)
+        -- Long-press on the title band opens SimpleUI's Title Bar settings window;
+        -- re-registered on every layout because our toolbar reservation changes the
+        -- band's height.
+        local band_y = 0
+        pcall(function()
+            local ok_t, T = pcall(require, "screens/sui_topbar")
+            if ok_t and T and T.TOTAL_TOP_H then
+                local ok_h, h = pcall(T.TOTAL_TOP_H)
+                if ok_h and tonumber(h) then band_y = tonumber(h) end
+            end
+        end)
+        registerTitleHoldZones(fm_self, band_y, target_h)
         pcall(function()
             local ok_ui, UIManager = pcall(require, "ui/uimanager")
             if ok_ui and UIManager then UIManager:setDirty(fm_self, "ui") end
