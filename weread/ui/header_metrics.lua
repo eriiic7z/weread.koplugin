@@ -18,6 +18,9 @@
 --     (ui/ko_custom_patches.lua): FACE / FACE_SIZE are shared, but FM keeps
 --     FM_TOP_PADDING = 0 instead of TOP_PADDING.
 
+local Device = require("device")
+local Screen = Device.screen
+
 local M = {
     FACE      = "smalltfont",
     FACE_SIZE = 28,   -- title font size, shared by all three page titles
@@ -27,9 +30,27 @@ local M = {
                        -- weread pages match it so the headers line up)
     FM_TOP_PADDING = 0, -- kept for call sites that name the FM case explicitly
 
-    -- Height of the control row under the separator (FileManager toolbar row:
-    -- icon glyph 26 + 8 tap padding). The shelf tool row and the stats tab row
-    -- use the same height so all three headers are structurally identical.
+    -- Control row under the separator (the local library's toolbar row is the
+    -- reference for both pages): glyph size, its invisible tap padding, the gap
+    -- below the separator, the inter-icon spacing and the trailing pad below the
+    -- row. The shelf uses the same numbers for its tab/action row, so the two
+    -- pages' "separator -> grid top" heights match (only the content inside the
+    -- row differs: icons there, text here).
+    ICON_PX    = 26,
+    ICON_PAD   = 8,
+    ICON_GAP   = 9,
+    ICON_GAP_X = 16,
+    ROW_TAIL   = 3,
+
+    -- Top spacing of the cover grid under the control row. Two numbers, because the
+    -- two control rows hide different amounts of empty band below their visible
+    -- content (FM's icons sit centred in a 61px box plus a 5px tail; the shelf's
+    -- tab/action row is text and hides almost none). The goal is ALIGNED GRID TOPS:
+    -- measured on device, FM's first cover row started 7px lower than the shelf's
+    -- (256 vs 249) at 14, so it is reduced by those 7px.
+    GRID_TOP_EXTRA = 10,  -- FM's grid shift (design units; ≈18px on a KPW4)
+
+    -- Kept for reference: the glyph + padding pair above, in design units.
     ROW_H = 34,
 
     LINE_GAP   = 6.5,  -- separator: below the title text box
@@ -69,6 +90,89 @@ function M.pagerScale()
         factor = M.PAGER_SCALE[key] or 1
     end)
     return factor
+end
+
+--- Icon box height (glyph + its invisible tap padding), both terms scaled by
+--- SimpleUI's title-bar size preset — the reference height of the control row.
+--- Mirrors the local library's own expression, term by term.
+function M.controlBoxH()
+    local s = M.uiScale()
+    return math.floor(Screen:scaleBySize(M.ICON_PX) * s)
+         + math.floor(Screen:scaleBySize(M.ICON_PAD) * s)
+end
+
+--- Full control-row height: the icon box plus the trailing pad the local library
+--- reserves below it.
+function M.controlRowH()
+    return M.controlBoxH() + Screen:scaleBySize(M.ROW_TAIL)
+end
+
+--- The ONE control source for both pages' cover grid: the rows/cols setting that
+--- coverbrowser owns and SimpleUI's own menu path writes (`nb_cols_portrait` /
+--- `nb_rows_portrait`, stored in settings/bookinfo_cache.sqlite3 and read here
+--- through BookInfoManager). The shelf must read the SETTING, not the FileManager's
+--- runtime fields: those only update when FM itself relayouts, so reading them made
+--- a setting change move FM's grid while leaving the shelf's alone.
+--- Returns nil when the setting can not be read (caller falls back to its own
+--- adaptive layout).
+function M.coverGridSpec()
+    local spec
+    pcall(function()
+        local ok_b, B = pcall(require, "bookinfomanager")
+        if not (ok_b and B and type(B.getSetting) == "function") then return end
+        local cols = tonumber(B:getSetting("nb_cols_portrait"))
+        local rows = tonumber(B:getSetting("nb_rows_portrait"))
+        if not (cols and rows and cols >= 1 and rows >= 1) then return end
+        spec = {
+            cols    = math.floor(cols),
+            rows    = math.floor(rows),
+            gap     = M.coverGap(),
+            label_h = M.coverLabelH(),
+        }
+    end)
+    return spec
+end
+
+--- Height the local library reserves under each cover for SimpleUI's title/author
+--- strips (nil when unavailable). Both pages use it so their covers come out the
+--- same size. Our own patch wraps MosaicMenu._updateItemsBuildUI and SimpleUI keeps
+--- the value as an upvalue of the ORIGINAL builder — hence the lookup there.
+function M.coverLabelH()
+    local h
+    pcall(function()
+        local ok_m, MM = pcall(require, "mosaicmenu")
+        local ok_u, userpatch = pcall(require, "userpatch")
+        if not (ok_m and ok_u and MM and userpatch) then return end
+        local fn = MM._wr_orig_updateItemsBuildUI or MM._updateItemsBuildUI
+        local item = fn and userpatch.getUpValue(fn, "MosaicMenuItem")
+        if item and tonumber(item._simpleui_strip_h) then
+            h = math.floor(tonumber(item._simpleui_strip_h))
+        end
+    end)
+    return h
+end
+
+--- Gap between two adjacent covers — the single knob for cover spacing and,
+--- through it, cover size: the local library's grid margin and the gap the
+--- bookshelf keeps around its cells both come from here (a smaller value = bigger
+--- covers, tighter grid). Derived from the shelf's cell decoration (padding +
+--- border on both sides, ui/size) so the pages share one number.
+function M.coverGap()
+    local gap = 6
+    pcall(function()
+        local Size = require("ui/size")
+        if Size and Size.padding and Size.border then
+            gap = 2 * ((Size.padding.tiny or 0) + (Size.border.thin or 0))
+        end
+    end)
+    return gap
+end
+
+--- Total space the control band takes under the separator: the gap the local
+--- library leaves between separator and row, plus the row itself. Pages that do
+--- not draw icons use it as a fixed band so their grid box matches FM's.
+function M.controlBandH()
+    return Screen:scaleBySize(M.ICON_GAP) + M.controlRowH()
 end
 
 --- Factor for SimpleUI's title-bar size preset (Compact / Default / Large =

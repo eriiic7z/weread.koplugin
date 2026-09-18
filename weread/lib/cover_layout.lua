@@ -38,7 +38,7 @@ function CoverLayout.calculate(options)
     local content_height = math.max(1, height - math.min(reserved_height, height - 1))
     local columns = math.max(1, math.floor(width / min_cell_width))
     local rows = math.max(1, math.floor(content_height / min_cell_height))
-    return {
+    local result = {
         columns = columns,
         rows = rows,
         page_size = columns * rows,
@@ -46,6 +46,21 @@ function CoverLayout.calculate(options)
         cell_height = math.max(1, math.floor(content_height / rows)),
         content_height = content_height,
     }
+    -- TEMP probe (remove once the grid unification measurement is done): why the
+    -- shelf lands on N columns/rows at this screen size.
+    pcall(function()
+        local logger = require("weread.lib.logger")
+        local sig = string.format("%d/%d/%d/%d/%.3f", width, height, columns, rows, size_scale)
+        if CoverLayout._wr_geo_sig ~= sig then
+            CoverLayout._wr_geo_sig = sig
+            logger.info(string.format(
+                "wrGeo: cover_layout %dx%d size_scale=%.3f card_scale=%.3f min_cell=%dx%d reserved=%d content_h=%d -> %dx%d",
+                width, height, size_scale, card_scale,
+                min_cell_width, min_cell_height, reserved_height, content_height,
+                columns, rows))
+        end
+    end)
+    return result
 end
 
 return CoverLayout

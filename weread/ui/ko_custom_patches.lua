@@ -490,58 +490,167 @@ local function installMosaicMarginHook()
     if mosaic_hook_installed then return end
     mosaic_hook_installed = true
     local orig_recalc = MM._recalculateDimen
-    local mosaic_top_extra = Screen:scaleBySize(14)
-    MM._recalculateDimen = function(self, ...)
-        orig_recalc(self, ...)
-        local m = Screen:scaleBySize(24)
-        local rows, cols = self.nb_rows, self.nb_cols
-        local id = self.inner_dimen
+    local mosaic_top_extra = Screen:scaleBySize(TitleMetrics.GRID_TOP_EXTRA)
+    -- Gap between covers, shared with the weread shelf (TitleMetrics.coverGap):
+    -- one number for both pages instead of a second hand-tuned margin.
+    local m = TitleMetrics.coverGap()
+    -- ONE place for the mosaic sizing, used by the recalc wrapper and again right
+    -- before the item build: some startup paths build the grid before our recalc
+    -- runs, which left the widened outer spacers and the old item width in the same
+    -- row — the row then overflowed and the right margin vanished until a settings
+    -- change re-synced them.
+    local function sizeMosaicItems(w)
+        local rows, cols = w.nb_rows, w.nb_cols
+        local id = w.inner_dimen
         if not (rows and cols and rows > 0 and cols > 0 and id and id.w and id.h) then
-            return
+            return false
         end
         -- keep the same bottom edge while the grid is shifted down by
         -- mosaic_top_extra (see the item_group top spacer below)
         local h_avail = math.max(1, id.h - mosaic_top_extra)
+        -- Outer margins match the title separator's inset (43px, like the bookshelf's
+        -- grid) while the gap BETWEEN covers stays the small shared value.
+        local outer = Screen:scaleBySize(TitleMetrics.LINE_INSET)
+        w.item_margin = m
+        w.item_height = math.max(1, math.floor(
+            (h_avail - (w.others_height or 0) - (1 + rows) * m) / rows))
+        w.item_width = math.max(1, math.floor(
+            (id.w - 2 * outer - (cols - 1) * m) / cols))
+        w.item_dimen = Geom:new{ x = 0, y = 0, w = w.item_width, h = w.item_height }
+        return true
+    end
+
+    MM._recalculateDimen = function(self, ...)
+        orig_recalc(self, ...)
+        -- Publish our margin unconditionally: when the geometry is not measurable
+        -- yet the code below bails out, and leaving upstream's value (18px) in place
+        -- let the bookshelf mirror a margin FM itself would never use.
         self.item_margin = m
-        self.item_height = math.max(1, math.floor(
-            (h_avail - (self.others_height or 0) - (1 + rows) * m) / rows))
-        self.item_width = math.max(1, math.floor(
-            (id.w - (1 + cols) * m) / cols))
-        self.item_dimen = Geom:new{
-            x = 0, y = 0,
-            w = self.item_width,
-            h = self.item_height,
-        }
+        local rows, cols = self.nb_rows, self.nb_cols
+        local id = self.inner_dimen
+        -- TEMP probe: prove the wrapper runs at all, and show the guard inputs.
+        pcall(function()
+            local sig = table.concat({ tostring(rows), tostring(cols),
+                tostring(id and id.w), tostring(id and id.h) }, ",")
+            if MM._wr_geo_in_sig ~= sig then
+                MM._wr_geo_in_sig = sig
+                logger.info("wrGeo: FM recalc enter rows=" .. tostring(rows)
+                    .. " cols=" .. tostring(cols)
+                    .. " inner=" .. tostring(id and id.w) .. "x" .. tostring(id and id.h)
+                    .. " perpage=" .. tostring(self.perpage)
+                    .. " others=" .. tostring(self.others_height))
+            end
+        end)
+        if not sizeMosaicItems(self) then
+            return
+        end
+        -- TEMP probe (remove after the grid unification measurement): the FM grid
+        -- metrics actually in force, i.e. whether our margin override landed — plus
+        -- the band/others numbers that decide the grid's ORIGIN, so a Button Size
+        -- change on FM can be traced to either the band or the layout pass.
+        pcall(function()
+            local tb_h = 0
+            pcall(function()
+                tb_h = (self.title_bar and self.title_bar.dimen and self.title_bar.dimen.h)
+                    or self.titlebar_height or -1
+            end)
+            local sig = table.concat({ self.item_margin or -1, self.item_width or -1,
+                self.item_height or -1, id.w or -1, id.h or -1,
+                self.others_height or -1, tb_h or -1 }, ",")
+            if MM._wr_geo_sig ~= sig then
+                MM._wr_geo_sig = sig
+                logger.info("wrGeo: FM mosaic m=" .. tostring(self.item_margin)
+                    .. " item=" .. tostring(self.item_width) .. "x" .. tostring(self.item_height)
+                    .. " inner=" .. tostring(id.w) .. "x" .. tostring(id.h)
+                    .. " cols=" .. tostring(cols) .. " rows=" .. tostring(rows)
+                    .. " others=" .. tostring(self.others_height)
+                    .. " tb=" .. tostring(tb_h)
+                    .. " topExtra=" .. mosaic_top_extra)
+            end
+        end)
     end
 
     -- shift the whole grid down: enlarge the item_group's leading spacer
     local orig_build = MM._updateItemsBuildUI
     if type(orig_build) == "function" then
+        -- Kept so the bookshelf can still read SimpleUI's strip height: it lives as
+        -- an upvalue of the ORIGINAL builder, not of this wrapper.
+        MM._wr_orig_updateItemsBuildUI = orig_build
         MM._updateItemsBuildUI = function(self, ...)
+            -- Size first: the items are built from self.item_dimen below.
+            sizeMosaicItems(self)
             local r = orig_build(self, ...)
             pcall(function()
                 local g = self.item_group
-                if g and g[1] and type(g[1].width) == "number" then
+                -- Shift exactly once per spacer object. coverbrowser rebuilds the
+                -- group's children on every update, but some paths reuse them, and
+                -- an unconditional "+= mosaic_top_extra" would push the grid lower
+                -- on every folder visit until the layout blew up.
+                if g and g[1] and type(g[1].width) == "number"
+                        and not g[1]._wr_grid_padded then
+                    g[1]._wr_grid_padded = true
                     g[1].width = g[1].width + mosaic_top_extra
+                end
+                -- Horizontal outer margins: DERIVED from the sizing just applied, so
+                -- every row always adds up to the available width (a constant span
+                -- could not correct a row built with a different item width).
+                local id_w = self.inner_dimen and self.inner_dimen.w
+                local cols = self.nb_cols
+                if id_w and cols and self.item_width then
+                    local span = math.max(m, math.floor(
+                        (id_w - cols * self.item_width - (cols - 1) * m) / 2))
+                    for _, container in ipairs(g or {}) do
+                        local row = container and container[1]
+                        if type(row) == "table" and row[1] and row[#row]
+                                and type(row[1].width) == "number"
+                                and type(row[#row].width) == "number" then
+                            row[1].width = span
+                            row[#row].width = span
+                        end
+                    end
                 end
             end)
             return r
         end
     end
+    -- coverbrowser copies these methods onto the widget class when mosaic is
+    -- enabled, and that copy is taken before this hook runs — so patching
+    -- MosaicMenu alone never reached the live grid. (The previous guard also
+    -- required FileChooser.nb_cols_portrait, which is only set when the user
+    -- changes that setting, so the fix-up was skipped at startup as well.) Patch
+    -- the class AND the live widget, with no such guard.
     local ok_fc, FC = pcall(require, "ui/widget/filechooser")
     if ok_fc and FC then
-        if FC.nb_cols_portrait and FC._recalculateDimen == orig_recalc then
+        if FC._recalculateDimen == orig_recalc then
             FC._recalculateDimen = MM._recalculateDimen
         end
-        -- coverbrowser copies the builder onto FileChooser when mosaic is
-        -- enabled; make sure that copy is our wrapped version too
         if type(orig_build) == "function"
                 and FC._updateItemsBuildUI == orig_build
                 and MM._updateItemsBuildUI then
             FC._updateItemsBuildUI = MM._updateItemsBuildUI
         end
     end
-    logger.info("wrFmPatch: mosaic margin hook installed")
+    -- coverbrowser assigns FileChooser._recalculateDimen from MosaicMenu while the
+    -- display mode is set up (main.lua:687) — at startup, i.e. *before* this hook
+    -- runs, which is why patching the module table alone never reached the grid.
+    -- The class assignment above plus this live-widget assignment is what makes the
+    -- margin land. A forced rebuild is deliberately NOT done here: calling
+    -- updateItems(1) at this point re-entered coverbrowser's own update path while
+    -- the FileManager was still drawing, and a class-level updateItems wrapper was
+    -- dropped for the same reason.
+    pcall(function()
+        local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+        local fm = ok_f and FM.instance
+        local fc = fm and (fm.file_chooser or (fm.ui and fm.ui.file_chooser))
+        if not fc then return end
+        if fc._recalculateDimen == orig_recalc then
+            fc._recalculateDimen = MM._recalculateDimen
+        end
+        if type(orig_build) == "function" and fc._updateItemsBuildUI == orig_build then
+            fc._updateItemsBuildUI = MM._updateItemsBuildUI
+        end
+    end)
+    logger.info("wrFmPatch: mosaic margin hook installed (m=" .. m .. ")")
 end
 
 --- Call synchronously from WeReadPlugin:init(): light FM title hook only, so
@@ -1125,9 +1234,107 @@ local function registerTitleHoldZones(fm_self, band_y, band_h)
     end)
 end
 
+--- TEMP diagnostic (remove once the screenshot gesture is confirmed working on our
+--- pages): wrap the native screenshot handlers so the log shows whether the
+--- gesture ever reached KOReader's own screenshot module.
+local function installScreenshotProbe()
+    local ok_s, Screenshoter = pcall(require, "ui/widget/screenshoter")
+    if not (ok_s and Screenshoter) or Screenshoter._wr_shot_probed then return end
+    Screenshoter._wr_shot_probed = true
+    for _, name in ipairs({ "onSwipeDiagonal", "onTapDiagonal", "onScreenshot" }) do
+        local orig = Screenshoter[name]
+        if type(orig) == "function" then
+            Screenshoter[name] = function(s, ...)
+                logger.info("wrShot: native screenshot handler reached: " .. name)
+                return orig(s, ...)
+            end
+        end
+    end
+    logger.info("wrShot: screenshot probe installed")
+end
+
+--- TEMP trace (remove with the other wrGeo lines): for a short window after a
+--- cover-grid setting change, record the repaint entry points. Goal: see which
+--- refresh the local library receives at "Apply" that our page does not.
+local function armRepaintTrace()
+    local ok_ui, UIManager = pcall(require, "ui/uimanager")
+    if not (ok_ui and UIManager) then return end
+    if not UIManager._wr_trace_hooked then
+        UIManager._wr_trace_hooked = true
+        UIManager._wr_trace_until = 0
+        local function ident(w)
+            if w == nil then return "nil" end
+            if type(w) ~= "table" then return tostring(w) end
+            local id = w.name
+            if not id then
+                local mt = getmetatable(w)
+                id = (mt and mt.__index and mt.__index.name) or "?"
+            end
+            return tostring(id)
+        end
+        local function trace(str)
+            if os.time() > (UIManager._wr_trace_until or 0) then return end
+            logger.info("wrTrace: " .. str)
+        end
+        local orig_set = UIManager.setDirty
+        UIManager.setDirty = function(self, widget, refreshtype, refreshregion, ...)
+            trace("setDirty w=" .. ident(widget) .. " type=" .. tostring(refreshtype)
+                .. " region=" .. (refreshregion ~= nil and "yes" or "no"))
+            return orig_set(self, widget, refreshtype, refreshregion, ...)
+        end
+        local orig_show = UIManager.show
+        UIManager.show = function(self, widget, ...)
+            trace("show " .. ident(widget))
+            return orig_show(self, widget, ...)
+        end
+        local orig_close = UIManager.close
+        UIManager.close = function(self, widget, ...)
+            trace("close " .. ident(widget))
+            return orig_close(self, widget, ...)
+        end
+        logger.info("wrTrace: repaint trace installed")
+    end
+    UIManager._wr_trace_until = os.time() + 3
+    logger.info("wrTrace: armed for 3s")
+end
+
+--- The rows/cols setting (coverbrowser's, which SimpleUI's menu path writes) is the
+--- ONE source both pages follow. The local library reacts on its own, but our pages
+--- only read it while laying out — so nudge them here, like the Button Size preset.
+local function installCoverGridChangeHook()
+    local ok_b, B = pcall(require, "bookinfomanager")
+    if not (ok_b and B and type(B.saveSetting) == "function") then return end
+    if B._wr_grid_hooked then return end
+    B._wr_grid_hooked = true
+    local orig = B.saveSetting
+    B.saveSetting = function(self, key, value, ...)
+        local res = orig(self, key, value, ...)
+        if key == "nb_cols_portrait" or key == "nb_rows_portrait" then
+            logger.info("wrGeo: cover-grid setting changed " .. tostring(key)
+                .. "=" .. tostring(value))
+            pcall(armRepaintTrace)
+            pcall(function()
+                local ok_ui, UIManager = pcall(require, "ui/uimanager")
+                local stack = ok_ui and UIManager
+                    and (UIManager._window_stack or UIManager.window_stack)
+                for _, entry in ipairs(stack or {}) do
+                    local w = entry and entry.widget
+                    if w and type(w.refreshCoverGrid) == "function" then
+                        w:refreshCoverGrid()
+                    end
+                end
+            end)
+        end
+        return res
+    end
+    logger.info("wrFmPatch: cover-grid setting hook installed")
+end
+
 local function apply_fm()
     installTitleFaceHook()
     installFMToolbarPatch()
+    pcall(installScreenshotProbe)
+    pcall(installCoverGridChangeHook)
     -- no timer: the preset hook must be in place before the user can change it
     pcall(installUiScaleRefreshHook)
     local ok_ui, UIManager = pcall(require, "ui/uimanager")
@@ -1183,13 +1390,16 @@ local fm_toolbar_installed = false
 -- the whole block aligned automatically); set one to a bar-relative number to
 -- pin just that element.
 local FM_HDR = {
+    -- Geometry shared with the weread pages (weread/ui/header_metrics.lua): the
+    -- shelf's tab/action band reads the same numbers, so both pages' grid boxes
+    -- keep the same height in every size preset.
     LINE_GAP   = TitleMetrics.LINE_GAP, -- separator offset below the title row
-    ICON_GAP   = 9,    -- toolbar row offset below the separator
+    ICON_GAP   = TitleMetrics.ICON_GAP, -- toolbar row offset below the separator
     SUB_SHIFT  = -4,   -- subtitle fine-tune around its row centring
     SIDE       = TitleMetrics.LINE_INSET, -- left/right inset (== separator ends)
-    ICON_PX    = 26,   -- icon glyph size
-    ICON_PAD   = 8,    -- invisible tap padding added to the glyph box
-    ICON_GAP_X = 16,   -- spacing between icons
+    ICON_PX    = TitleMetrics.ICON_PX,  -- icon glyph size
+    ICON_PAD   = TitleMetrics.ICON_PAD, -- invisible tap padding added to the glyph box
+    ICON_GAP_X = TitleMetrics.ICON_GAP_X, -- spacing between icons
     ICONS_Y    = nil,  -- optional override: pin the toolbar row (nil = derive)
     SUB_Y      = nil,  -- optional override: pin the subtitle    (nil = derive)
 }
@@ -1274,7 +1484,7 @@ layoutFMToolbar = function(fm_self)
     -- this row aligned with the title separator above it.
     local size_scale = TitleMetrics.uiScale()
     local glyph = math.floor(Screen:scaleBySize(FM_HDR.ICON_PX) * size_scale)
-    local box   = glyph + math.floor(Screen:scaleBySize(FM_HDR.ICON_PAD) * size_scale)
+    local box   = TitleMetrics.controlBoxH()   -- glyph + its invisible tap padding
     local gap   = math.floor(Screen:scaleBySize(FM_HDR.ICON_GAP_X) * size_scale)
     local side  = Screen:scaleBySize(FM_HDR.SIDE)
 
@@ -1428,9 +1638,22 @@ layoutFMToolbar = function(fm_self)
         if unchanged then return end
 
         -- reserve the toolbar row inside the TitleBar so content moves down
-        local target_h = y + box + Screen:scaleBySize(3)
+        local target_h = y + box + Screen:scaleBySize(TitleMetrics.ROW_TAIL)
         local cur_h    = tb.titlebar_height or (tb.dimen and tb.dimen.h) or 0
-        if target_h > cur_h then
+        -- Follow the band in BOTH directions: SimpleUI's Button Size preset can
+        -- shrink the row too, and pinning only the growth left the grid behind.
+        local band_changed = (target_h ~= cur_h)
+        -- Publish the band we just computed: the bookshelf derives its own top pad
+        -- from it (FM title band + this row + the grid's own top spacing), so grid
+        -- tops stay aligned across SimpleUI's Button Size presets. Our own number,
+        -- not a KOReader field, so it can never silently read as nil.
+        M._fm_band = {
+            titlebar_h = target_h,
+            top_extra  = Screen:scaleBySize(TitleMetrics.GRID_TOP_EXTRA),
+            row_y      = y,
+            box        = box,
+        }
+        if band_changed then
             tb.titlebar_height = target_h
             if tb.dimen then
                 tb.dimen = Geom:new{ x = 0, y = 0, w = tb.dimen.w, h = target_h }
@@ -1439,6 +1662,94 @@ layoutFMToolbar = function(fm_self)
         pcall(function()
             if fm_self._recalculateDimen then fm_self:_recalculateDimen() end
         end)
+        -- Grid top follows the title band. KOReader's outer layout caches the item
+        -- group's offset (measured: the painted y stayed at 212 while the band went
+        -- 168 → 186), so we correct the paint coordinate ourselves. The target is an
+        -- ABSOLUTE value measured on device: the item group is painted at
+        -- (status-bar height + title band), because the grid's own top spacing is the
+        -- item group's internal leading spacer. Using an absolute target needs no
+        -- "reference band", and if KOReader's cache ever refreshes by itself the
+        -- correction simply becomes zero. Installed on every layout so the first
+        -- paint is already covered.
+        pcall(function()
+            local fc = fm_self.file_chooser or (fm_self.ui and fm_self.ui.file_chooser)
+            local ig = fc and fc.item_group
+            if not (ig and type(ig.paintTo) == "function") or ig._wr_grid_shift_hooked then
+                return
+            end
+            ig._wr_grid_shift_hooked = true
+            local topbar_h = 0
+            pcall(function()
+                local ok_t, T = pcall(require, "screens/sui_topbar")
+                if ok_t and T and T.TOTAL_TOP_H then
+                    local ok_h, h = pcall(T.TOTAL_TOP_H)
+                    if ok_h and tonumber(h) then topbar_h = tonumber(h) end
+                end
+            end)
+            local orig_paint = ig.paintTo
+            ig.paintTo = function(g, bb, x, y, ...)
+                local dy = 0
+                pcall(function()
+                    local band = M._fm_band
+                    local tb_h = band and band.titlebar_h or nil
+                    if tb_h then
+                        dy = (topbar_h + tb_h) - y
+                    end
+                    local key = tostring(y) .. "/" .. tostring(dy) .. "/" .. tostring(tb_h)
+                    if ig._wr_origin_sig ~= key then
+                        ig._wr_origin_sig = key
+                        logger.info("wrGeo: FM origin raw_y=" .. tostring(y)
+                            .. " target=" .. tostring(topbar_h + (tb_h or 0))
+                            .. " dy=" .. tostring(dy)
+                            .. " tb=" .. tostring(tb_h)
+                            .. " item_h=" .. tostring(fc.item_height))
+                    end
+                end)
+                return orig_paint(g, bb, x, y + dy, ...)
+            end
+        end)
+        -- Re-measuring alone does not move the covers: coverbrowser only re-lays the
+        -- grid out on a list refresh, so when the band height changed do what its own
+        -- CoverBrowser:refreshFileManagerInstance does (main.lua:621-627). The
+        -- signature guard above keeps this from recursing.
+        if band_changed then
+            pcall(function()
+                local fc = fm_self.file_chooser or (fm_self.ui and fm_self.ui.file_chooser)
+                if not fc then return end
+                if fc._recalculateDimen then fc:_recalculateDimen() end
+                if fc.switchItemTable then
+                    fc:switchItemTable(nil, nil, fc.prev_itemnumber, { dummy = "" })
+                end
+                -- TEMP read-only probe: log the y the grid block is actually painted
+                -- at, so "does the grid translate when the band changes?" is answered
+                -- by a number. Nothing is modified here.
+                if fc.item_group and not fc.item_group._wr_origin_probe
+                        and type(fc.item_group.paintTo) == "function" then
+                    local ig = fc.item_group
+                    ig._wr_origin_probe = true
+                    local orig_paint = ig.paintTo
+                    ig.paintTo = function(g, bb, x, y, ...)
+                        -- Diagnostic only: keep it inside pcall so a probe mistake can
+                        -- never take the painting path down with it (that is exactly
+                        -- how the previous "white screen + crash" happened).
+                        pcall(function()
+                            local tb_h = fc.title_bar and fc.title_bar.dimen
+                                and fc.title_bar.dimen.h
+                            local key = tostring(y) .. "/" .. tostring(tb_h)
+                                .. "/" .. tostring(fc.item_height)
+                            if ig._wr_origin_sig ~= key then
+                                ig._wr_origin_sig = key
+                                logger.info("wrGeo: FM origin grid_y=" .. tostring(y)
+                                    .. " tb=" .. tostring(tb_h)
+                                    .. " item_h=" .. tostring(fc.item_height)
+                                    .. " inner_h=" .. tostring(fc.inner_dimen and fc.inner_dimen.h))
+                            end
+                        end)
+                        return orig_paint(g, bb, x, y, ...)
+                    end
+                end
+            end)
+        end
         -- Long-press on the title band opens SimpleUI's Title Bar settings window;
         -- re-registered on every layout because our toolbar reservation changes the
         -- band's height.
@@ -1482,6 +1793,13 @@ end
 -- ---------------------------------------------------------------------------
 -- Entry points
 -- ---------------------------------------------------------------------------
+--- FM band numbers from the last toolbar layout (see M._fm_band above): the
+--- bookshelf uses them to keep its grid top aligned with the local library's.
+--- nil until the FM has laid its toolbar out once (caller then falls back).
+function M.fmBand()
+    return M._fm_band
+end
+
 M.ensure = ensure          -- veil only (safe to call repeatedly)
 M.apply = apply_fm         -- FM visuals only
 --- Opened by long-pressing a bar: the FM title bar (see registerTitleHoldZones)

@@ -187,18 +187,27 @@ local CoverCell = InputContainer:extend{
     cover_path = nil,
     cover_loading = false,
     cached = false,
+    label_h = nil,        -- exact label band (mirrored from the local library)
+    pad_inner = true,     -- false when mirroring FM (its cells carry no padding)
     callback = nil,
     show_parent = nil,
 }
 
 function CoverCell:init()
-    local padding = Size.padding.small
+    -- Mirrored cells reproduce FM's geometry exactly: no inner padding (FM fits the
+    -- art to the whole cell) and the label band it reserves for the SimpleUI strips.
+    local padding = self.pad_inner == false and 0 or Size.padding.small
     local border = Size.border.thin
     local cover_width = math.max(1, self.width - 2 * padding)
-    local label_height = math.min(
-        math.max(1, math.floor(self.height * 0.35)),
-        Screen:scaleBySize(52)
-    )
+    local label_height
+    if tonumber(self.label_h) then
+        label_height = math.max(0, math.min(self.height - 1, math.floor(self.label_h)))
+    else
+        label_height = math.min(
+            math.max(1, math.floor(self.height * 0.35)),
+            Screen:scaleBySize(52)
+        )
+    end
     local cover_height = math.max(1, self.height - label_height)
     -- image box = max area inside the cell (frame border reserved)
     local image_width = math.max(1, cover_width - 2 * border)
@@ -466,12 +475,13 @@ function LibraryView:toolRow()
     local actions = self:actionBar()
     local tw = math.max(1, tab_group:getSize().w)
     local aw = math.max(1, actions:getSize().w)
-    -- Kept as the natural content height (plan C: only the header TOP is
-    -- unified across the three pages, rows keep their own height).
+    -- Kept as the natural content height: the two pages keep their own control
+    -- rows (their content differs), and the content boxes are equalised separately
+    -- by adding whitespace on the taller side — no element size changes anywhere.
     local h = math.max(tab_group:getSize().h, actions:getSize().h)
     -- tab group inset by the dock separator's own side margin, so the tabs
     -- align with the cover grid and the bottom dock divider
-    local side_m = Screen:scaleBySize(24)
+    local side_m = Screen:scaleBySize(TitleMetrics.LINE_INSET)
     local gap_w = math.max(0, self.screen_w - side_m - tw - aw)
     local row = HorizontalGroup:new{
         align = "center",
@@ -633,22 +643,62 @@ function LibraryView:content()
         last = math.min(#source, first + self.page_size - 1)
     end
     if self.cover_mode and self.mode == "books" then
-        -- the added author line pushed the grid up against the tab underline;
-        -- restore the previous headroom with a leading spacer
-        table.insert(content, VerticalSpan:new{ width = Screen:scaleBySize(12) })
         local columns = math.max(1, math.floor(tonumber(self.cover_columns) or 3))
         local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
-        -- the grid as a whole is inset on both sides by the dock separator's
-        -- own margin; per-book spacing/size logic below is unchanged
-        local side_m = self.cover_side_margin or Screen:scaleBySize(24)
-        local usable_w = math.max(1, self.content_width - 2 * side_m)
-        local cell_width = math.floor(usable_w / columns)
-        local cell_height = math.floor(math.max(
-            1,
-            tonumber(self.cover_cell_height) or math.floor(self.screen_h * 0.28)
-        ))
-        local grid_height = math.max(cell_height, tonumber(self.cover_content_height)
-            or cell_height * rows)
+        local gap = math.max(0, math.floor(tonumber(self.cover_gap) or 0))
+        local box_h = math.max(1, math.floor(tonumber(self.cover_content_height)
+            or self.screen_h))
+        local mirrored = tonumber(self.cover_gap) ~= nil   -- shared spec in force
+        -- Outer margins keep the separator's inset (the alignment this page always
+        -- had); only the gap BETWEEN covers is the small shared value.
+        local side_m = self.cover_side_margin
+            or Screen:scaleBySize(TitleMetrics.LINE_INSET)
+        local usable_w = math.max(1,
+            self.content_width - 2 * side_m - (columns - 1) * gap)
+        local cell_width = math.max(1, math.floor(usable_w / columns))
+        local shared_h = math.min(box_h, tonumber(self.cover_area_cap) or box_h)
+        -- Above the grid: the local library's own spacing, derived from the band its
+        -- toolbar patch published (title band + row + grid top margin). Falls back to
+        -- the spacing this page has always had when that is unavailable.
+        local top_pad = Screen:scaleBySize(12)
+        pcall(function()
+            local P = require("weread.ui.ko_custom_patches")
+            local band = P and P.fmBand and P.fmBand()
+            if band and tonumber(band.titlebar_h) and tonumber(band.top_extra) then
+                local our_band = self.title_bar:getHeight()
+                    + (self._title_sep_h or 0) + (self._tool_row_h or 0)
+                top_pad = math.max(0,
+                    (band.titlebar_h + band.top_extra + gap) - our_band)
+            end
+        end)
+        local avail_h = math.max(1, shared_h - top_pad)
+        local cell_height = math.max(1, math.floor(
+            (avail_h - (rows + 1) * gap) / rows))
+        local grid_height = rows * cell_height + (rows + 1) * gap
+        local bottom_pad = math.max(0, box_h - top_pad - grid_height)
+        table.insert(content, VerticalSpan:new{ width = top_pad })
+        -- TEMP probe (remove after the grid unification measurement): the shelf's
+        -- real cell geometry, incl. the label/cover split inside a cell.
+        pcall(function()
+            local pad = mirrored and 0 or Size.padding.small
+            local border = Size.border.thin
+            local cover_w = math.max(1, cell_width - 2 * pad)
+            local label = tonumber(self.cover_label_h)
+                or math.min(math.max(1, math.floor(cell_height * 0.35)),
+                    Screen:scaleBySize(52))
+            local sig = table.concat({ tostring(mirrored), columns, rows, side_m,
+                cell_width, cell_height, gap, label, grid_height }, ",")
+            if self._wr_geo_cell_sig ~= sig then
+                self._wr_geo_cell_sig = sig
+                logger.info("wrGeo: shelf grid mirrored=" .. tostring(mirrored)
+                    .. " " .. columns .. "x" .. rows
+                    .. " side=" .. side_m .. " gap=" .. gap
+                    .. " cell=" .. cell_width .. "x" .. cell_height
+                    .. " gridH=" .. grid_height
+                    .. " coverBox=" .. (cover_w - 2 * border) .. "x"
+                    .. math.max(1, cell_height - label) .. " label=" .. label)
+            end
+        end)
         local grid_row
         for index = first, last do
             local book = source[index]
@@ -663,11 +713,15 @@ function LibraryView:content()
                     HorizontalSpan:new{ width = side_m },
                 })
             end
-            local width = column == columns
-                and usable_w - cell_width * (columns - 1)
-                or cell_width
-            local height = row == rows and grid_height - cell_height * (rows - 1)
-                or cell_height
+            local width = cell_width
+            if column == columns then
+                width = math.max(1, self.content_width
+                    - (columns - 1) * (cell_width + gap) - 2 * side_m)
+            end
+            local height = cell_height
+            if row == rows then
+                height = math.max(1, grid_height - (rows - 1) * (cell_height + gap))
+            end
             local cover_cell = CoverCell:new{
                 book = book,
                 cached = book._cached == true,
@@ -675,6 +729,8 @@ function LibraryView:content()
                 cover_loading = self.cover_loading and self.cover_loading[book] == true,
                 width = width,
                 height = math.max(1, height),
+                label_h = mirrored and self.cover_label_h or nil,
+                pad_inner = not mirrored,
                 show_parent = self,
                 callback = function()
                     if self.on_select then self.on_select(book, self.mode) end
@@ -682,6 +738,12 @@ function LibraryView:content()
             }
             self._item_rows[#self._item_rows + 1] = cover_cell
             grid_row[#grid_row + 1] = cover_cell
+            if column < columns and gap > 0 then
+                grid_row[#grid_row + 1] = HorizontalSpan:new{ width = gap }
+            end
+        end
+        if bottom_pad > 0 then
+            table.insert(content, VerticalSpan:new{ width = bottom_pad })
         end
     else
         local pub = self.mode == "public_account"
@@ -890,6 +952,50 @@ function LibraryView:init()
     -- (no load-order coupling).
     local FullscreenHost = require("weread.ui.fullscreen_host")
     FullscreenHost.install(self)
+    -- KOReader's own screenshot module: FileManager registers it as an active
+    -- widget (filemanager.lua:400) so its two-finger-tap / long-diagonal-swipe
+    -- gestures work while it is on top. Our fullscreen page sits above it, so it
+    -- needs its own registration — same native module, same code path, nothing
+    -- reimplemented.
+    pcall(function()
+        local Screenshoter = require("ui/widget/screenshoter")
+        local ok_fm, FM = pcall(require, "apps/filemanager/filemanager")
+        local fm = ok_fm and FM.instance
+        self._wr_screenshot = Screenshoter:new{ prefix = "FileManager", ui = fm or self }
+        self.active_widgets = { self._wr_screenshot }
+    end)
+    -- KOReader's gesture → action mappings (the Gestures plugin) and SimpleUI's own
+    -- gestures are registered as touch zones on the *FileManager*, which this
+    -- fullscreen page covers — so those mappings silently stop working here. Hand a
+    -- gesture our page did not consume to the FileManager's own handler.
+    -- Only the two-finger / pinch family is forwarded: one-finger gestures belong to
+    -- this page (scroll, frontlight edge, pager, title hold).
+    local FORWARD_GESTURES = {
+        pinch = true, spread = true, inward_pan = true, outward_pan = true,
+        two_finger_tap = true, two_finger_swipe = true,
+    }
+    pcall(function()
+        local orig_gesture = self.onGesture
+        self.onGesture = function(s, ev)
+            local r = orig_gesture and orig_gesture(s, ev)
+            local ges = ev and ev.ges
+            if not r and ges and FORWARD_GESTURES[ges] then
+                local fwd = false
+                pcall(function()
+                    local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+                    local fm = ok_f and FM.instance
+                    if fm and type(fm.onGesture) == "function" then
+                        fwd = fm:onGesture(ev) and true or false
+                    end
+                end)
+                -- TEMP diagnostic (remove once confirmed working)
+                logger.info("wrShot: forwarded " .. tostring(ges)
+                    .. " to FileManager, handled=" .. tostring(fwd))
+                if fwd then return true end
+            end
+            return r
+        end
+    end)
     self.screen_w = Screen:getWidth()
     self.screen_h = Screen:getHeight()
     self.native_bar = FullscreenHost.nativeBarAvailable()
@@ -932,6 +1038,56 @@ end
 --- here, and the scroll area / cover cell height / rows per page follow from the
 --- row heights. Called by init, and again by refreshUiScale() on a preset change.
 function LibraryView:buildLayout()
+    -- TEMP probe (remove with the other wrGeo lines): prove whether this page is
+    -- actually PAINTED after the grid-setting rebuild, i.e. whether the problem is a
+    -- skipped paint or a skipped screen refresh.
+    if not self._wr_paint_probe then
+        self._wr_paint_probe = true
+        local orig_paint = self.paintTo
+        self.paintTo = function(s, bb, x, y, ...)
+            pcall(function()
+                local key = tostring(s.cover_columns) .. "x" .. tostring(s.cover_rows)
+                if s._wr_paint_sig ~= key then
+                    s._wr_paint_sig = key
+                    logger.info("wrGeo: shelf painted " .. key)
+                end
+            end)
+            return orig_paint(s, bb, x, y, ...)
+        end
+    end
+    -- Mirror the local library's live mosaic grid (coverbrowser's FileChooser)
+    -- before anything sizes itself from it: page count, cell metrics and label band
+    -- all come from FM, so both pages show the same cells. nil when the
+    -- FileManager / mosaic is unavailable — this page then keeps its own layout.
+    local grid = nil
+    if self.cover_mode and self.mode == "books" then
+        -- Rows/cols come from the ONE setting both pages follow (coverbrowser's,
+        -- which SimpleUI's menu path writes). Cell sizes are deliberately NOT taken
+        -- from there: the grid stays adaptive and fills the area shared with the
+        -- local library. Reading the SETTING (not FM's runtime fields) is what makes
+        -- a rows/cols change move this page too.
+        local spec = TitleMetrics.coverGridSpec()
+        if spec then
+            grid = spec
+            self.cover_columns  = spec.cols
+            self.cover_rows     = spec.rows
+            self.cover_gap      = spec.gap
+            self.cover_label_h  = spec.label_h
+            -- Shared grid area = the local library's usable list height. Capping
+            -- ours to it keeps both grids the same size; the surplus becomes
+            -- whitespace below, never bigger cells.
+            self.cover_area_cap = nil
+            pcall(function()
+                local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+                local fm = ok_f and FM.instance
+                local fc = fm and (fm.file_chooser or (fm.ui and fm.ui.file_chooser))
+                if fc and fc.inner_dimen and fc.inner_dimen.h and fc.others_height then
+                    local h = fc.inner_dimen.h - fc.others_height
+                    if h > 0 then self.cover_area_cap = math.floor(h) end
+                end
+            end)
+        end
+    end
     local tool = self:toolRow()
     -- title separator: mirrors the bottom dock divider (same thin light-grey
     -- line inset by cover_side_margin on both sides), replacing the built-in
@@ -978,6 +1134,25 @@ function LibraryView:buildLayout()
     local scroll_h = math.max(1, layout_h
         - self.title_bar:getHeight() - title_sep:getSize().h
         - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
+    -- TEMP probe (remove after the grid unification measurement): the real band
+    -- heights that decide the shelf's grid box.
+    pcall(function()
+        local fm_pager = 0
+        pcall(function() fm_pager = self:fmPagerRowHeight() or 0 end)
+        local sig = table.concat({ self.title_bar:getHeight(), title_sep:getSize().h,
+            tool:getSize().h, page_bar and page_bar:getSize().h or 0, scroll_h, layout_h }, ",")
+        if self._wr_geo_band_sig ~= sig then
+            self._wr_geo_band_sig = sig
+            logger.info("wrGeo: shelf bands layout=" .. layout_h
+                .. " title=" .. self.title_bar:getHeight()
+                .. " sep=" .. title_sep:getSize().h
+                .. " tool=" .. tool:getSize().h
+                .. " pager=" .. (page_bar and page_bar:getSize().h or 0)
+                .. " fmPager=" .. fm_pager
+                .. " gap=" .. pager_gap
+                .. " scroll=" .. scroll_h)
+        end
+    end)
     -- Public-account list: auto-fit the rows per page to the viewport, so no
     -- dead line is left between the list and the pager (page rows are NOT
     -- hard-coded here; they follow the available scroll height).
@@ -1007,9 +1182,15 @@ function LibraryView:buildLayout()
         end
     end
     if self.cover_mode and self.mode == "books" then
-        local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
         self.cover_content_height = scroll_h
-        self.cover_cell_height = math.max(1, math.floor(scroll_h / rows))
+        if not grid then
+            -- Fallback (no live metrics): this page's own grid.
+            local rows = math.max(1, math.floor(tonumber(self.cover_rows) or 2))
+            self.cover_cell_height = math.max(1, math.floor(scroll_h / rows))
+            self.cover_cell_width  = nil
+            self.cover_gap         = nil
+            self.cover_label_h     = nil
+        end
     end
     local content = self:content()
     local scroll = ScrollableContainer:new{
@@ -1017,6 +1198,20 @@ function LibraryView:buildLayout()
         show_parent = self,
         VerticalGroup:new{ align = "left", content },
     }
+    -- KOReader's built-in screenshot gesture is a long diagonal swipe, and its own
+    -- fullscreen widgets deliberately let diagonal swipes propagate for that very
+    -- reason (bookstatuswidget.lua:535-540). A ScrollableContainer consumes every
+    -- swipe, which would otherwise swallow the gesture before FileManager's
+    -- screenshot module (registered as an active widget) ever sees it.
+    local orig_scroll_swipe = scroll.onScrollableSwipe
+    scroll.onScrollableSwipe = function(s, arg, ges_ev)
+        local d = ges_ev and ges_ev.direction
+        if d == "northeast" or d == "northwest"
+                or d == "southeast" or d == "southwest" then
+            return false
+        end
+        return orig_scroll_swipe and orig_scroll_swipe(s, arg, ges_ev)
+    end
     -- ScrollableContainer registers full-SCREEN gesture ranges, and it sits
     -- before the pager in the tree (propagation is children-first, ascending).
     -- The pager taps are handled by the pager's own widgets (native zones), so no
@@ -1102,6 +1297,47 @@ function LibraryView:refreshUiScale()
     self:buildLayout()
     self:registerTitleHoldZones()   -- the band height may have changed with the row
     UIManager:setDirty(self, "ui")
+end
+
+--- The shared rows/cols setting changed (coverbrowser's, written through
+--- SimpleUI's menu path): re-read it and rebuild in place. This page only reads the
+--- setting while laying out, so the setting hook in ko_custom_patches calls this —
+--- the local library reacts on its own, which is why only our pages needed it.
+function LibraryView:refreshCoverGrid()
+    if not (self.cover_mode and self.mode == "books") then return end
+    self:buildLayout()
+    self:registerTitleHoldZones()
+    -- TEMP probe (remove with the other wrGeo lines): when does the rebuild happen,
+    -- and with which rows/cols?
+    logger.info("wrGeo: shelf refreshCoverGrid -> " .. tostring(self.cover_columns)
+        .. "x" .. tostring(self.cover_rows))
+    -- TEMP probe: who is above us in the window stack while the setting is applied?
+    -- (name, or the widget's class when it has none — the two menu layers above this
+    -- page are what decides whether our fresh pixels survive.)
+    pcall(function()
+        local stack = UIManager._window_stack or UIManager.window_stack
+        local names = {}
+        for _, entry in ipairs(stack or {}) do
+            local w = entry and entry.widget
+            local id = w and w.name or nil
+            if not id and w then
+                local mt = getmetatable(w)
+                id = (mt and mt.__index and mt.__index.name) or tostring(w):gsub("^table: ", "")
+            end
+            names[#names + 1] = tostring(id)
+        end
+        logger.info("wrGeo: shelf stack=" .. table.concat(names, ">"))
+    end)
+    -- Screen-wide, not just this widget: the setting was changed from a settings
+    -- window that sits ON TOP of this page, so a repaint limited to our own region
+    -- would stay hidden until that window closes (the local library, changed through
+    -- the same menu, repaints for the same reason).
+    -- Widget-scoped, refreshtype nil: this is EXACTLY what the settings window's close
+    -- path does for this page (trace: `setDirty w=weread_shelf type=nil`), and it forces
+    -- this widget into the repaint list. A screen-wide setDirty(nil, "ui") is swallowed
+    -- while a menu covers the page (the coverage walk drops it), which is why the new
+    -- grid only appeared once that menu closed.
+    pcall(function() UIManager:setDirty(self, nil) end)
 end
 
 --- Long-press on the title band (title row, separator, tab/action row) opens

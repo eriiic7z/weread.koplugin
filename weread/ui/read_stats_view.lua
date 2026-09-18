@@ -605,6 +605,50 @@ function ReadStatsView:init()
         self.covers_fullscreen = true
     end
 
+    -- KOReader's own screenshot module, registered as an active widget exactly like
+    -- FileManager does (filemanager.lua:400): our fullscreen page sits above the
+    -- FileManager, so without this its long-diagonal-swipe / two-finger-tap
+    -- gestures never reach it.
+    pcall(function()
+        local Screenshoter = require("ui/widget/screenshoter")
+        local ok_fm, FM = pcall(require, "apps/filemanager/filemanager")
+        local fm = ok_fm and FM.instance
+        self._wr_screenshot = Screenshoter:new{ prefix = "FileManager", ui = fm or self }
+        self.active_widgets = { self._wr_screenshot }
+    end)
+    -- KOReader's gesture → action mappings (the Gestures plugin) and SimpleUI's own
+    -- gestures are registered as touch zones on the *FileManager*, which this
+    -- fullscreen page covers — so those mappings silently stop working here. Hand a
+    -- gesture our page did not consume to the FileManager's own handler.
+    -- Only the two-finger / pinch family is forwarded: one-finger gestures belong to
+    -- this page (scroll, frontlight, pager).
+    local FORWARD_GESTURES = {
+        pinch = true, spread = true, inward_pan = true, outward_pan = true,
+        two_finger_tap = true, two_finger_swipe = true,
+    }
+    pcall(function()
+        local orig_gesture = self.onGesture
+        self.onGesture = function(s, ev)
+            local r = orig_gesture and orig_gesture(s, ev)
+            local ges = ev and ev.ges
+            if not r and ges and FORWARD_GESTURES[ges] then
+                local fwd = false
+                pcall(function()
+                    local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+                    local fm = ok_f and FM.instance
+                    if fm and type(fm.onGesture) == "function" then
+                        fwd = fm:onGesture(ev) and true or false
+                    end
+                end)
+                -- TEMP diagnostic (remove once confirmed working)
+                logger.info("wrShot: forwarded " .. tostring(ges)
+                    .. " to FileManager, handled=" .. tostring(fwd))
+                if fwd then return true end
+            end
+            return r
+        end
+    end)
+
     -- Authoritative widths. Reserve space for the scrollbar so cards never get
     -- cropped, and derive the inner content width from card border + padding.
     self.outer_margin = Size.padding.large
@@ -698,6 +742,19 @@ function ReadStatsView:buildLayout()
             },
         },
     }
+    -- Let KOReader's built-in screenshot gesture (a long diagonal swipe) through:
+    -- its own fullscreen widgets do the same on purpose (bookstatuswidget.lua:535-
+    -- 540), while a ScrollableContainer consumes every swipe and would otherwise
+    -- swallow the gesture before FileManager's screenshot module sees it.
+    local orig_scroll_swipe = scroll.onScrollableSwipe
+    scroll.onScrollableSwipe = function(s, arg, ges_ev)
+        local d = ges_ev and ges_ev.direction
+        if d == "northeast" or d == "northwest"
+                or d == "southeast" or d == "southwest" then
+            return false
+        end
+        return orig_scroll_swipe and orig_scroll_swipe(s, arg, ges_ev)
+    end
     self.scroll = scroll
     -- halve the scrollbar width vs the stock default (6 → 3 scale units)
     scroll.scroll_bar_width = math.max(1, math.floor(Screen:scaleBySize(6) / 2))

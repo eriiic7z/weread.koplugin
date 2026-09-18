@@ -232,6 +232,12 @@ end
 
 --- Frontlight swipe (left edge / two fingers), KOReader-consistent.
 function Host:onFrontlightSwipe(ges)
+    -- TEMP diagnostic (remove together with the screenshot probe in
+    -- ko_custom_patches.lua): shows what the frontlight zone sees and whether it
+    -- consumes the gesture, so a swallowed screenshot swipe can be ruled out.
+    logger.info("wrShot: frontlight zone ges=" .. tostring(type(ges) == "table" and ges.ges or ges)
+        .. " dir=" .. tostring(type(ges) == "table" and ges.direction or nil)
+        .. " dist=" .. tostring(type(ges) == "table" and ges.distance or nil))
     if not Device:hasFrontlight() then return false end
     local dir = type(ges) == "table" and ges.direction or nil
     local direction
