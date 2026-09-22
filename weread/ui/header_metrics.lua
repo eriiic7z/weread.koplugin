@@ -108,20 +108,37 @@ function M.controlRowH()
 end
 
 --- The ONE control source for both pages' cover grid: the rows/cols setting that
---- coverbrowser owns and SimpleUI's own menu path writes (`nb_cols_portrait` /
---- `nb_rows_portrait`, stored in settings/bookinfo_cache.sqlite3 and read here
---- through BookInfoManager). The shelf must read the SETTING, not the FileManager's
---- runtime fields: those only update when FM itself relayouts, so reading them made
---- a setting change move FM's grid while leaving the shelf's alone.
---- Returns nil when the setting can not be read (caller falls back to its own
---- adaptive layout).
+--- coverbrowser owns (`nb_cols_portrait` / `nb_rows_portrait`).
+---
+--- Order matters: read the FileManager's LIVE fields first and only fall back to the
+--- stored setting. coverbrowser's own "items per page" widget sets those fields on
+--- APPLY (`fc.nb_cols_portrait = cols; fc:updateItems()`) but writes the setting on
+--- CLOSE (coverbrowser/main.lua:222-242) — so a setting-first read rebuilt this page
+--- with the value being replaced, which is why the new grid only appeared once the
+--- window was closed. The live fields are also what FM itself renders with, so both
+--- pages stay pixel-consistent. SimpleUI's window path writes the setting first and
+--- relayouts FM right after; our mosaic watcher rebuilds us again then (cheap, same
+--- result), so either order ends up correct.
+--- Returns nil when neither source is readable (caller falls back to its own layout).
 function M.coverGridSpec()
     local spec
     pcall(function()
-        local ok_b, B = pcall(require, "bookinfomanager")
-        if not (ok_b and B and type(B.getSetting) == "function") then return end
-        local cols = tonumber(B:getSetting("nb_cols_portrait"))
-        local rows = tonumber(B:getSetting("nb_rows_portrait"))
+        local cols, rows
+        pcall(function()
+            local ok_f, FM = pcall(require, "apps/filemanager/filemanager")
+            local fm = ok_f and FM and FM.instance
+            local fc = fm and (fm.file_chooser or (fm.ui and fm.ui.file_chooser))
+            if fc then
+                cols = tonumber(fc.nb_cols_portrait)
+                rows = tonumber(fc.nb_rows_portrait)
+            end
+        end)
+        if not (cols and rows and cols >= 1 and rows >= 1) then
+            local ok_b, B = pcall(require, "bookinfomanager")
+            if not (ok_b and B and type(B.getSetting) == "function") then return end
+            cols = tonumber(B:getSetting("nb_cols_portrait"))
+            rows = tonumber(B:getSetting("nb_rows_portrait"))
+        end
         if not (cols and rows and cols >= 1 and rows >= 1) then return end
         spec = {
             cols    = math.floor(cols),

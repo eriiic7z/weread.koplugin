@@ -677,28 +677,6 @@ function LibraryView:content()
         local grid_height = rows * cell_height + (rows + 1) * gap
         local bottom_pad = math.max(0, box_h - top_pad - grid_height)
         table.insert(content, VerticalSpan:new{ width = top_pad })
-        -- TEMP probe (remove after the grid unification measurement): the shelf's
-        -- real cell geometry, incl. the label/cover split inside a cell.
-        pcall(function()
-            local pad = mirrored and 0 or Size.padding.small
-            local border = Size.border.thin
-            local cover_w = math.max(1, cell_width - 2 * pad)
-            local label = tonumber(self.cover_label_h)
-                or math.min(math.max(1, math.floor(cell_height * 0.35)),
-                    Screen:scaleBySize(52))
-            local sig = table.concat({ tostring(mirrored), columns, rows, side_m,
-                cell_width, cell_height, gap, label, grid_height }, ",")
-            if self._wr_geo_cell_sig ~= sig then
-                self._wr_geo_cell_sig = sig
-                logger.info("wrGeo: shelf grid mirrored=" .. tostring(mirrored)
-                    .. " " .. columns .. "x" .. rows
-                    .. " side=" .. side_m .. " gap=" .. gap
-                    .. " cell=" .. cell_width .. "x" .. cell_height
-                    .. " gridH=" .. grid_height
-                    .. " coverBox=" .. (cover_w - 2 * border) .. "x"
-                    .. math.max(1, cell_height - label) .. " label=" .. label)
-            end
-        end)
         local grid_row
         for index = first, last do
             local book = source[index]
@@ -988,9 +966,6 @@ function LibraryView:init()
                         fwd = fm:onGesture(ev) and true or false
                     end
                 end)
-                -- TEMP diagnostic (remove once confirmed working)
-                logger.info("wrShot: forwarded " .. tostring(ges)
-                    .. " to FileManager, handled=" .. tostring(fwd))
                 if fwd then return true end
             end
             return r
@@ -1038,23 +1013,6 @@ end
 --- here, and the scroll area / cover cell height / rows per page follow from the
 --- row heights. Called by init, and again by refreshUiScale() on a preset change.
 function LibraryView:buildLayout()
-    -- TEMP probe (remove with the other wrGeo lines): prove whether this page is
-    -- actually PAINTED after the grid-setting rebuild, i.e. whether the problem is a
-    -- skipped paint or a skipped screen refresh.
-    if not self._wr_paint_probe then
-        self._wr_paint_probe = true
-        local orig_paint = self.paintTo
-        self.paintTo = function(s, bb, x, y, ...)
-            pcall(function()
-                local key = tostring(s.cover_columns) .. "x" .. tostring(s.cover_rows)
-                if s._wr_paint_sig ~= key then
-                    s._wr_paint_sig = key
-                    logger.info("wrGeo: shelf painted " .. key)
-                end
-            end)
-            return orig_paint(s, bb, x, y, ...)
-        end
-    end
     -- Mirror the local library's live mosaic grid (coverbrowser's FileChooser)
     -- before anything sizes itself from it: page count, cell metrics and label band
     -- all come from FM, so both pages show the same cells. nil when the
@@ -1134,25 +1092,6 @@ function LibraryView:buildLayout()
     local scroll_h = math.max(1, layout_h
         - self.title_bar:getHeight() - title_sep:getSize().h
         - tool:getSize().h - (page_bar and page_bar:getSize().h or 0) - pager_gap)
-    -- TEMP probe (remove after the grid unification measurement): the real band
-    -- heights that decide the shelf's grid box.
-    pcall(function()
-        local fm_pager = 0
-        pcall(function() fm_pager = self:fmPagerRowHeight() or 0 end)
-        local sig = table.concat({ self.title_bar:getHeight(), title_sep:getSize().h,
-            tool:getSize().h, page_bar and page_bar:getSize().h or 0, scroll_h, layout_h }, ",")
-        if self._wr_geo_band_sig ~= sig then
-            self._wr_geo_band_sig = sig
-            logger.info("wrGeo: shelf bands layout=" .. layout_h
-                .. " title=" .. self.title_bar:getHeight()
-                .. " sep=" .. title_sep:getSize().h
-                .. " tool=" .. tool:getSize().h
-                .. " pager=" .. (page_bar and page_bar:getSize().h or 0)
-                .. " fmPager=" .. fm_pager
-                .. " gap=" .. pager_gap
-                .. " scroll=" .. scroll_h)
-        end
-    end)
     -- Public-account list: auto-fit the rows per page to the viewport, so no
     -- dead line is left between the list and the pager (page rows are NOT
     -- hard-coded here; they follow the available scroll height).
@@ -1307,37 +1246,13 @@ function LibraryView:refreshCoverGrid()
     if not (self.cover_mode and self.mode == "books") then return end
     self:buildLayout()
     self:registerTitleHoldZones()
-    -- TEMP probe (remove with the other wrGeo lines): when does the rebuild happen,
-    -- and with which rows/cols?
-    logger.info("wrGeo: shelf refreshCoverGrid -> " .. tostring(self.cover_columns)
-        .. "x" .. tostring(self.cover_rows))
-    -- TEMP probe: who is above us in the window stack while the setting is applied?
-    -- (name, or the widget's class when it has none — the two menu layers above this
-    -- page are what decides whether our fresh pixels survive.)
-    pcall(function()
-        local stack = UIManager._window_stack or UIManager.window_stack
-        local names = {}
-        for _, entry in ipairs(stack or {}) do
-            local w = entry and entry.widget
-            local id = w and w.name or nil
-            if not id and w then
-                local mt = getmetatable(w)
-                id = (mt and mt.__index and mt.__index.name) or tostring(w):gsub("^table: ", "")
-            end
-            names[#names + 1] = tostring(id)
-        end
-        logger.info("wrGeo: shelf stack=" .. table.concat(names, ">"))
-    end)
-    -- Screen-wide, not just this widget: the setting was changed from a settings
-    -- window that sits ON TOP of this page, so a repaint limited to our own region
-    -- would stay hidden until that window closes (the local library, changed through
-    -- the same menu, repaints for the same reason).
-    -- Widget-scoped, refreshtype nil: this is EXACTLY what the settings window's close
-    -- path does for this page (trace: `setDirty w=weread_shelf type=nil`), and it forces
-    -- this widget into the repaint list. A screen-wide setDirty(nil, "ui") is swallowed
-    -- while a menu covers the page (the coverage walk drops it), which is why the new
-    -- grid only appeared once that menu closed.
-    pcall(function() UIManager:setDirty(self, nil) end)
+    -- Repaint with "all" + auto refreshtype. The setting is changed from a window that
+    -- sits ON TOP of this page, and KOReader's repaint walk starts at the topmost widget
+    -- declaring covers_fullscreen and drops everything below it — a widget-scoped or
+    -- screen-wide request therefore never reached the screen, and the new grid only
+    -- appeared once that window closed. "all" marks every window dirty, so this page is
+    -- painted and the refresh covers it.
+    pcall(function() UIManager:setDirty("all", nil) end)
 end
 
 --- Long-press on the title band (title row, separator, tab/action row) opens

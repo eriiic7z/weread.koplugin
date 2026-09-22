@@ -481,6 +481,26 @@ local function installPagerTextPatch()
     end)
 end
 
+--- Tell the live weread pages that the shared rows/cols changed so they rebuild in
+--- place. Two callers, because the two menu paths differ:
+---   * SimpleUI's settings window writes the setting on APPLY -> the store hook fires;
+---   * coverbrowser's own "items per page" widget only mutates the FileChooser fields
+---     on apply and writes the setting on CLOSE (main.lua:222-242) -> there the
+---     relayout is what happens at apply, so the mosaic recalc watches for it.
+local function notifyCoverGridChange()
+    pcall(function()
+        local ok_ui, UIManager = pcall(require, "ui/uimanager")
+        local stack = ok_ui and UIManager
+            and (UIManager._window_stack or UIManager.window_stack)
+        for _, entry in ipairs(stack or {}) do
+            local w = entry and entry.widget
+            if w and type(w.refreshCoverGrid) == "function" then
+                w:refreshCoverGrid()
+            end
+        end
+    end)
+end
+
 local function installMosaicMarginHook()
     local ok_m, MM = pcall(require, "mosaicmenu")
     if not ok_m or not MM or type(MM._recalculateDimen) ~= "function" then
@@ -526,48 +546,36 @@ local function installMosaicMarginHook()
         -- yet the code below bails out, and leaving upstream's value (18px) in place
         -- let the bookshelf mirror a margin FM itself would never use.
         self.item_margin = m
-        local rows, cols = self.nb_rows, self.nb_cols
-        local id = self.inner_dimen
-        -- TEMP probe: prove the wrapper runs at all, and show the guard inputs.
-        pcall(function()
-            local sig = table.concat({ tostring(rows), tostring(cols),
-                tostring(id and id.w), tostring(id and id.h) }, ",")
-            if MM._wr_geo_in_sig ~= sig then
-                MM._wr_geo_in_sig = sig
-                logger.info("wrGeo: FM recalc enter rows=" .. tostring(rows)
-                    .. " cols=" .. tostring(cols)
-                    .. " inner=" .. tostring(id and id.w) .. "x" .. tostring(id and id.h)
-                    .. " perpage=" .. tostring(self.perpage)
-                    .. " others=" .. tostring(self.others_height))
-            end
-        end)
         if not sizeMosaicItems(self) then
             return
         end
-        -- TEMP probe (remove after the grid unification measurement): the FM grid
-        -- metrics actually in force, i.e. whether our margin override landed — plus
-        -- the band/others numbers that decide the grid's ORIGIN, so a Button Size
-        -- change on FM can be traced to either the band or the layout pass.
-        pcall(function()
-            local tb_h = 0
-            pcall(function()
-                tb_h = (self.title_bar and self.title_bar.dimen and self.title_bar.dimen.h)
-                    or self.titlebar_height or -1
-            end)
-            local sig = table.concat({ self.item_margin or -1, self.item_width or -1,
-                self.item_height or -1, id.w or -1, id.h or -1,
-                self.others_height or -1, tb_h or -1 }, ",")
-            if MM._wr_geo_sig ~= sig then
-                MM._wr_geo_sig = sig
-                logger.info("wrGeo: FM mosaic m=" .. tostring(self.item_margin)
-                    .. " item=" .. tostring(self.item_width) .. "x" .. tostring(self.item_height)
-                    .. " inner=" .. tostring(id.w) .. "x" .. tostring(id.h)
-                    .. " cols=" .. tostring(cols) .. " rows=" .. tostring(rows)
-                    .. " others=" .. tostring(self.others_height)
-                    .. " tb=" .. tostring(tb_h)
-                    .. " topExtra=" .. mosaic_top_extra)
+        -- The local library's rows/cols changed without a settings write (coverbrowser
+        -- mutates the fields on APPLY and saves them on close): follow the relayout.
+        -- Needed a first-run case: on the FIRST apply after KOReader starts there is no
+        -- baseline yet, and requiring one kept the watcher silent — the shelf then only
+        -- followed the close-time setting write ("first apply does nothing, every later
+        -- one is instant"). With no baseline, compare against the stored setting
+        -- instead: a difference means an apply already happened, so notify.
+        local n_cols, n_rows = self.nb_cols, self.nb_rows
+        if n_cols and n_rows then
+            local seen = MM._wr_grid_seen
+            if not seen then
+                local stored_cols, stored_rows
+                pcall(function()
+                    local ok_b, B = pcall(require, "bookinfomanager")
+                    if ok_b and B and type(B.getSetting) == "function" then
+                        stored_cols = tonumber(B:getSetting("nb_cols_portrait"))
+                        stored_rows = tonumber(B:getSetting("nb_rows_portrait"))
+                    end
+                end)
+                if stored_cols ~= n_cols or stored_rows ~= n_rows then
+                    notifyCoverGridChange()
+                end
+            elseif seen[1] ~= n_cols or seen[2] ~= n_rows then
+                notifyCoverGridChange()
             end
-        end)
+            MM._wr_grid_seen = { n_cols, n_rows }
+        end
     end
 
     -- shift the whole grid down: enlarge the item_group's leading spacer
@@ -1069,7 +1077,7 @@ local function installUiScaleRefreshHook()
         end)
         return res
     end
-    logger.info("wrSizeHook: titlebar.reapplyAll wrapped (hosted pages refresh live)")
+    logger.info("wrFmPatch: titlebar.reapplyAll wrapped (hosted pages refresh live)")
 end
 
 --- Opens SimpleUI's own "Title Bar" settings window — the same one its menu
@@ -1234,70 +1242,6 @@ local function registerTitleHoldZones(fm_self, band_y, band_h)
     end)
 end
 
---- TEMP diagnostic (remove once the screenshot gesture is confirmed working on our
---- pages): wrap the native screenshot handlers so the log shows whether the
---- gesture ever reached KOReader's own screenshot module.
-local function installScreenshotProbe()
-    local ok_s, Screenshoter = pcall(require, "ui/widget/screenshoter")
-    if not (ok_s and Screenshoter) or Screenshoter._wr_shot_probed then return end
-    Screenshoter._wr_shot_probed = true
-    for _, name in ipairs({ "onSwipeDiagonal", "onTapDiagonal", "onScreenshot" }) do
-        local orig = Screenshoter[name]
-        if type(orig) == "function" then
-            Screenshoter[name] = function(s, ...)
-                logger.info("wrShot: native screenshot handler reached: " .. name)
-                return orig(s, ...)
-            end
-        end
-    end
-    logger.info("wrShot: screenshot probe installed")
-end
-
---- TEMP trace (remove with the other wrGeo lines): for a short window after a
---- cover-grid setting change, record the repaint entry points. Goal: see which
---- refresh the local library receives at "Apply" that our page does not.
-local function armRepaintTrace()
-    local ok_ui, UIManager = pcall(require, "ui/uimanager")
-    if not (ok_ui and UIManager) then return end
-    if not UIManager._wr_trace_hooked then
-        UIManager._wr_trace_hooked = true
-        UIManager._wr_trace_until = 0
-        local function ident(w)
-            if w == nil then return "nil" end
-            if type(w) ~= "table" then return tostring(w) end
-            local id = w.name
-            if not id then
-                local mt = getmetatable(w)
-                id = (mt and mt.__index and mt.__index.name) or "?"
-            end
-            return tostring(id)
-        end
-        local function trace(str)
-            if os.time() > (UIManager._wr_trace_until or 0) then return end
-            logger.info("wrTrace: " .. str)
-        end
-        local orig_set = UIManager.setDirty
-        UIManager.setDirty = function(self, widget, refreshtype, refreshregion, ...)
-            trace("setDirty w=" .. ident(widget) .. " type=" .. tostring(refreshtype)
-                .. " region=" .. (refreshregion ~= nil and "yes" or "no"))
-            return orig_set(self, widget, refreshtype, refreshregion, ...)
-        end
-        local orig_show = UIManager.show
-        UIManager.show = function(self, widget, ...)
-            trace("show " .. ident(widget))
-            return orig_show(self, widget, ...)
-        end
-        local orig_close = UIManager.close
-        UIManager.close = function(self, widget, ...)
-            trace("close " .. ident(widget))
-            return orig_close(self, widget, ...)
-        end
-        logger.info("wrTrace: repaint trace installed")
-    end
-    UIManager._wr_trace_until = os.time() + 3
-    logger.info("wrTrace: armed for 3s")
-end
-
 --- The rows/cols setting (coverbrowser's, which SimpleUI's menu path writes) is the
 --- ONE source both pages follow. The local library reacts on its own, but our pages
 --- only read it while laying out — so nudge them here, like the Button Size preset.
@@ -1310,20 +1254,7 @@ local function installCoverGridChangeHook()
     B.saveSetting = function(self, key, value, ...)
         local res = orig(self, key, value, ...)
         if key == "nb_cols_portrait" or key == "nb_rows_portrait" then
-            logger.info("wrGeo: cover-grid setting changed " .. tostring(key)
-                .. "=" .. tostring(value))
-            pcall(armRepaintTrace)
-            pcall(function()
-                local ok_ui, UIManager = pcall(require, "ui/uimanager")
-                local stack = ok_ui and UIManager
-                    and (UIManager._window_stack or UIManager.window_stack)
-                for _, entry in ipairs(stack or {}) do
-                    local w = entry and entry.widget
-                    if w and type(w.refreshCoverGrid) == "function" then
-                        w:refreshCoverGrid()
-                    end
-                end
-            end)
+            notifyCoverGridChange()
         end
         return res
     end
@@ -1333,7 +1264,6 @@ end
 local function apply_fm()
     installTitleFaceHook()
     installFMToolbarPatch()
-    pcall(installScreenshotProbe)
     pcall(installCoverGridChangeHook)
     -- no timer: the preset hook must be in place before the user can change it
     pcall(installUiScaleRefreshHook)
@@ -1695,15 +1625,6 @@ layoutFMToolbar = function(fm_self)
                     if tb_h then
                         dy = (topbar_h + tb_h) - y
                     end
-                    local key = tostring(y) .. "/" .. tostring(dy) .. "/" .. tostring(tb_h)
-                    if ig._wr_origin_sig ~= key then
-                        ig._wr_origin_sig = key
-                        logger.info("wrGeo: FM origin raw_y=" .. tostring(y)
-                            .. " target=" .. tostring(topbar_h + (tb_h or 0))
-                            .. " dy=" .. tostring(dy)
-                            .. " tb=" .. tostring(tb_h)
-                            .. " item_h=" .. tostring(fc.item_height))
-                    end
                 end)
                 return orig_paint(g, bb, x, y + dy, ...)
             end
@@ -1719,34 +1640,6 @@ layoutFMToolbar = function(fm_self)
                 if fc._recalculateDimen then fc:_recalculateDimen() end
                 if fc.switchItemTable then
                     fc:switchItemTable(nil, nil, fc.prev_itemnumber, { dummy = "" })
-                end
-                -- TEMP read-only probe: log the y the grid block is actually painted
-                -- at, so "does the grid translate when the band changes?" is answered
-                -- by a number. Nothing is modified here.
-                if fc.item_group and not fc.item_group._wr_origin_probe
-                        and type(fc.item_group.paintTo) == "function" then
-                    local ig = fc.item_group
-                    ig._wr_origin_probe = true
-                    local orig_paint = ig.paintTo
-                    ig.paintTo = function(g, bb, x, y, ...)
-                        -- Diagnostic only: keep it inside pcall so a probe mistake can
-                        -- never take the painting path down with it (that is exactly
-                        -- how the previous "white screen + crash" happened).
-                        pcall(function()
-                            local tb_h = fc.title_bar and fc.title_bar.dimen
-                                and fc.title_bar.dimen.h
-                            local key = tostring(y) .. "/" .. tostring(tb_h)
-                                .. "/" .. tostring(fc.item_height)
-                            if ig._wr_origin_sig ~= key then
-                                ig._wr_origin_sig = key
-                                logger.info("wrGeo: FM origin grid_y=" .. tostring(y)
-                                    .. " tb=" .. tostring(tb_h)
-                                    .. " item_h=" .. tostring(fc.item_height)
-                                    .. " inner_h=" .. tostring(fc.inner_dimen and fc.inner_dimen.h))
-                            end
-                        end)
-                        return orig_paint(g, bb, x, y, ...)
-                    end
                 end
             end)
         end

@@ -640,9 +640,6 @@ function ReadStatsView:init()
                         fwd = fm:onGesture(ev) and true or false
                     end
                 end)
-                -- TEMP diagnostic (remove once confirmed working)
-                logger.info("wrShot: forwarded " .. tostring(ges)
-                    .. " to FileManager, handled=" .. tostring(fwd))
                 if fwd then return true end
             end
             return r
