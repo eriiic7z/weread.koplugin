@@ -371,18 +371,7 @@ function M:showShelfView(mode, keyword, old_view, options)
             end
         end
     end
-    -- Close the replaced view through closeForNavigation(): that sets the same
-    -- _navbar_closing_intentionally flag SimpleUI's own navigate sets, so the
-    -- closing page skips its "restore the FM tab" rebuild.
-    if old_view then
-        pcall(function()
-            if old_view.closeForNavigation then
-                old_view:closeForNavigation()
-            else
-                UIManager:close(old_view)
-            end
-        end)
-    end
+    if old_view then UIManager:close(old_view) end
     local view
     view = LibraryView.show({
         mode = mode,
@@ -409,11 +398,6 @@ function M:showShelfView(mode, keyword, old_view, options)
             next_options.prepared_shelf = { books = books, accounts = accounts }
             next_options.page = self.shelf_view_pages[new_mode] or 1
             self:showShelfView(new_mode, keyword, view, next_options)
-        end,
-        on_stats = function(shelf_view)
-            -- family-internal switch: show the stats page over the shelf and let
-            -- it close the shelf once its data is ready (no FM/home flash)
-            self:showReadStats(nil, shelf_view)
         end,
         on_search = function()
             self:showShelfSearchDialog(view, mode, keyword, options)

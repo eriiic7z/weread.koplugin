@@ -4,6 +4,12 @@
 
 格式依据 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [1.4.2-fork.10] - 2026-09-24
+
+### 改进
+
+- **内部重构：定制改动由上游文件迁入补丁模块** — 使用者可见的行为不变。
+
 ## [1.4.2-fork.9] - 2026-09-22
 
 ### 变更

@@ -22,6 +22,26 @@ local TitleMetrics = require("weread.ui.header_metrics")
 
 local M = {}
 
+--- Preload swaps (called from main.lua BEFORE its other requires): we keep our own
+--- implementations of two upstream view files and hand them out under the upstream
+--- module names, so those upstream files can stay identical with upstream.
+---
+--- MUST run at load time (main.lua top), not in init(): weread/ui/read_report.lua
+--- captures `require("weread.ui.read_stats_view")` in a file-local at load time, so
+--- a later swap would hand it the upstream class instead of ours.
+function M.install_preload()
+    -- package.preload (deferred) instead of package.loaded: our view modules require
+    -- THIS module at load time, so loading them eagerly here would hand them a
+    -- half-built table; preload defers each swap to the first real require.
+    package.preload["weread.ui.library_view"]    = function() return require("weread.ui.shelf_view_fork") end
+    package.preload["weread.ui.read_stats_view"] = function() return require("weread.ui.stats_view_fork") end
+    -- NOTE: weread.ui.read_report is NOT swapped — its two stats-entry methods are
+    -- replaced in place by installReadReportPatch() below, so that upstream file is
+    -- loaded as-is. (A dead swap entry here once pointed at a deleted file and would
+    -- have thrown on the first require.)
+    logger.info("wrFork: preload swaps installed")
+end
+
 -- ---------------------------------------------------------------------------
 -- 1) Kindle-style menu veil
 -- ---------------------------------------------------------------------------
@@ -1693,6 +1713,251 @@ function M.fmBand()
     return M._fm_band
 end
 
+-- ---------------------------------------------------------------------------
+-- 8) Fork-only bits moved out of upstream files (so those files stay identical)
+-- ---------------------------------------------------------------------------
+--- Busy dialog that only appears if the work is still running after `seconds`:
+--- fast paths show nothing, slow loads still get feedback. (Moved here from
+--- weread/ui/common.lua.)
+local function installBusyPatch(host)
+    local ok, Common = pcall(require, "weread.ui.common")
+    if not (ok and Common) or Common._wr_busy_patched then return end
+    Common._wr_busy_patched = true
+    function Common:showBusyDelayed(seconds, text)
+        self:closeBusy()
+        local token = {}
+        self._busy_token = token
+        UIManager:scheduleIn(seconds or 3, function()
+            if self._busy_token ~= token then return end -- finished meanwhile
+            self._busy_token = nil
+            self:showBusy(text)
+        end)
+    end
+    local orig_close = Common.closeBusy
+    if type(orig_close) == "function" then
+        Common.closeBusy = function(self, ...)
+            self._busy_token = nil
+            return orig_close(self, ...)
+        end
+    end
+    -- the plugin received `common` by value at LOAD time (Mixin.apply), i.e. before
+    -- these were added/changed here: hand the live instance the new members too.
+    if host then
+        host.showBusyDelayed = Common.showBusyDelayed
+        host.closeBusy = Common.closeBusy
+    end
+
+    logger.info("wrFork: busy patch installed")
+end
+
+--- Shelf-entry patches (moved here from weread/ui/library.lua): close the replaced
+--- view through closeForNavigation() (same flag SimpleUI's own navigate sets, so the
+--- closing page skips its "restore the FM tab" rebuild) and hand the shelf our
+--- on_stats switch.
+local function installShelfPatch(host)
+    local ok, Lib = pcall(require, "weread.ui.library")
+    if ok and Lib and type(Lib.showShelfView) == "function" and not Lib._wr_shelf_patched then
+        Lib._wr_shelf_patched = true
+        local orig = Lib.showShelfView
+        Lib.showShelfView = function(self, mode, keyword, old_view, options)
+            if old_view and type(old_view.closeForNavigation) == "function" then
+                pcall(function() old_view:closeForNavigation() end)
+                old_view = nil -- the original body then skips its UIManager:close
+            end
+            return orig(self, mode, keyword, old_view, options)
+        end
+    end
+    -- Mixin.apply() copies methods onto the plugin instance at LOAD time, so a
+    -- module-table replacement alone never reaches the live plugin: mirror it.
+    if host and type(host.showShelfView) == "function" then
+        host.showShelfView = Lib.showShelfView
+    end
+
+    local ok_v, View = pcall(require, "weread.ui.shelf_view_fork")
+    if ok_v and View and type(View.show) == "function" and not View._wr_on_stats_injected then
+        View._wr_on_stats_injected = true
+        local orig_show = View.show
+        View.show = function(data, callbacks)
+            if type(callbacks) == "table" and callbacks.on_stats == nil then
+                callbacks.on_stats = function(shelf_view)
+                    -- IMPORTANT: showReadStats lives on the PLUGIN instance (read_report is
+                    -- mixed in at load time) — NOT on the library module. Looking it up on
+                    -- library.lua made this callback a silent no-op, so the dock's stats tab
+                    -- looked like a dead tap.
+                    local target = host
+                    if not (target and type(target.showReadStats) == "function") then
+                        local ok_r, RR = pcall(require, "weread.ui.read_report")
+                        target = (ok_r and RR and type(RR.showReadStats) == "function")
+                            and RR or nil
+                    end
+                    if target then target:showReadStats(nil, shelf_view) end
+                end
+            end
+            return orig_show(data, callbacks)
+        end
+    end
+    logger.info("wrFork: shelf patch installed")
+end
+
+--- read_report.lua 的两个方法（原在该文件里；为让上游文件保持原样，移到这里做方法级替换）
+--- 依赖解析与上游 read_report.lua 顶部保持一致。
+local function installReadReportPatch(host)
+    local ok, RR = pcall(require, "weread.ui.read_report")
+    if not (ok and RR) or RR._wr_stats_patched then return end
+    RR._wr_stats_patched = true
+
+    local PluginUtil = require("weread.lib.plugin_util")
+    local ReadStats = require("weread.lib.read_stats")
+    local ReadStatsView = require("weread.ui.read_stats_view") -- preload 已换成我们的实现
+    local _ = PluginUtil.tr
+    local T = PluginUtil.T
+    local log_error = PluginUtil.log_error
+    local display_error = PluginUtil.display_error
+
+function RR:showReadStats(host_mode, host_close)
+    if not self:requireLogin(false, true) then
+        return
+    end
+    -- auto-host: hosted overlay (dock/bands) whenever we are NOT inside a
+    -- reader document (reading stats inside a book stays full-screen)
+    if host_mode == nil then
+        local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
+        host_mode = not (ok_r and ReaderUI.instance)
+    end
+    -- Family switch: when the stats page is opened from the bookshelf (its dock
+    -- tab is a SimpleUI QA, so SimpleUI does not close our page for us), hand
+    -- the shelf over as host_close — it is closed only once the stats data is
+    -- ready, exactly like the in-place switch used to do. Without this the
+    -- stats page opens under the still-open shelf and looks like a dead tap.
+    if host_close == nil then
+        pcall(function()
+            local ok_ui, UIManager = pcall(require, "ui/uimanager")
+            local stack = ok_ui and UIManager
+                and (UIManager._window_stack or UIManager.window_stack)
+            for i = #stack, 1, -1 do
+                local w = stack[i] and stack[i].widget
+                if w and w.name == "weread_shelf" then
+                    host_close = w
+                    break
+                end
+            end
+        end)
+    end
+    -- Open on the monthly tab by default. host_close (the shelf view opened
+    -- from) is dropped only once the stats data is ready, so no FM flash.
+    pcall(function()
+        local ok_ui, UIMgr = pcall(require, "ui/uimanager")
+        local stack = ok_ui and UIMgr and (UIMgr._window_stack or UIMgr.window_stack)
+        local top = {}
+        for i = #(stack or {}), 1, -1 do
+            local w = stack[i] and stack[i].widget
+            top[#top + 1] = (w and (w.name or w.id or "?")) or "nil"
+            if #top >= 3 then break end
+        end
+        logger.info("wrFlow: showReadStats host_mode=" .. tostring(host_mode)
+            .. " host_close=" .. tostring(host_close ~= nil)
+            .. " top=" .. table.concat(top, ">"))
+    end)
+    self:loadReadStats("monthly", nil, nil, host_mode, host_close)
+end
+
+-- Fetch reading statistics for a period and (re)show the visualization page.
+-- old_view, when provided, is closed once the new data is ready (tab switch or
+-- period navigation). host_close is closed right before the (re)shown page
+-- when opening hosted from below (shelf dock).
+
+function RR:loadReadStats(mode, base_time, old_view, host_mode, host_close)
+    logger.info("wrFlow: load mode=" .. tostring(mode)
+        .. " host_mode=" .. tostring(host_mode)
+        .. " old_view=" .. tostring(old_view ~= nil)
+        .. " host_close=" .. tostring(host_close ~= nil))
+    -- Delayed: cached loads finish well under this, so the banner only appears
+    -- for a genuinely slow fetch (1.5s ≈ above the fast path, below the point
+    -- where users start doubting the tap and press again).
+    self:showBusyDelayed(1.5, _("Loading reading statistics..."))
+    self:runOnlineTask(_("Reading statistics"), function()
+        local ok, data = pcall(function()
+            return ReadStats.fetch(self.client, mode, base_time)
+        end)
+        self:closeBusy()
+        if not ok then
+            logger.err("load reading statistics failed:", log_error(data))
+            self:showInfo(T(_("%1 failed:\n%2"), _("Reading statistics"), display_error(data)))
+            return
+        end
+        logger.info("wrFlow: fetched, showing")
+        -- Close the page(s) we are replacing FIRST, then show the new one, in this
+        -- same tick — SimpleUI's own tab navigation does exactly that
+        -- (screens/sui_bottombar.lua: "Close the open screen first … Doing
+        -- navigation after avoids a redundant FM repaint while it is still
+        -- covered"), and weread's own read_report.lua also closed old_view before
+        -- showing the next page. closeForNavigation() carries the
+        -- _navbar_closing_intentionally flag so the closing page skips the
+        -- redundant "restore the FM tab" rebuild. Both land in ONE UIManager
+        -- repaint pass; showing first and closing afterwards forced a second pass
+        -- over the already covered area — that was the flash.
+        if old_view then
+            pcall(function()
+                if old_view.closeForNavigation then
+                    old_view:closeForNavigation()
+                else
+                    UIManager:close(old_view)
+                end
+            end)
+        end
+        if host_close then
+            pcall(function()
+                if host_close.closeForNavigation then
+                    host_close:closeForNavigation()
+                else
+                    UIManager:close(host_close)
+                end
+            end)
+        end
+        local view
+        view = ReadStatsView.show(data, {
+            host_mode = host_mode,
+            on_prev = function()
+                self:loadReadStats(mode, data.prev_base_time, view, host_mode)
+            end,
+            on_next = function()
+                self:loadReadStats(mode, data.next_base_time, view, host_mode)
+            end,
+            on_switch = function(new_mode)
+                self:loadReadStats(new_mode, nil, view, host_mode)
+            end,
+            -- navpager: long-press on the dock's right arrow jumps back to the
+            -- newest period (base_time = nil); one reload, no stepping.
+            on_latest = function()
+                self:loadReadStats(mode, nil, view, host_mode)
+            end,
+            on_bookshelf = function()
+                -- Same native order (see loadReadStats): close this page first,
+                -- then show the shelf, in one tick — one repaint pass.
+                local closing = view
+                if closing then
+                    pcall(function()
+                        if closing.closeForNavigation then
+                            closing:closeForNavigation()
+                        elseif closing.onClose then
+                            closing:onClose()
+                        end
+                    end)
+                end
+                self:showBookshelf()
+            end,
+        })
+    end)
+end
+    -- same reason as installShelfPatch: the plugin got the upstream methods by value
+    if host then
+        host.showReadStats = RR.showReadStats
+        host.loadReadStats = RR.loadReadStats
+    end
+
+    logger.info("wrFork: read_report patch installed")
+end
+
 M.ensure = ensure          -- veil only (safe to call repeatedly)
 M.apply = apply_fm         -- FM visuals only
 --- Opened by long-pressing a bar: the FM title bar (see registerTitleHoldZones)
@@ -1705,9 +1970,12 @@ M.openPaginationBarSettingsWindow = openPaginationBarSettingsWindow
 --- Wires long-press (on release) of a pager control to that window; used by both
 --- the local library's pager and the bookshelf's own pager.
 M.hookPagerHoldToSettings = hookPagerHoldToSettings
-function M.install()       -- both, used by WeReadPlugin:init()
+function M.install(host)   -- host = the live WeReadPlugin instance (see main.lua)
     ensure()
     apply_fm()
+    pcall(installBusyPatch, host)
+    pcall(installShelfPatch, host)
+    pcall(installReadReportPatch, host)
 end
 
 return M

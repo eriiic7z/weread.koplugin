@@ -8,5 +8,3 @@ __pycache__/
 .DS_Store
 /.idea/
 /dist/
-AGENTS.md
-scripts_dev/

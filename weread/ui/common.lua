@@ -52,22 +52,7 @@ function M:showBusy(text)
     self:refreshUI()
 end
 
---- Busy dialog that only appears if the work is still running after
---- `seconds`. Fast paths (cache hits) therefore show nothing at all, while a
---- slow load still gets feedback — which is why we delay instead of removing.
-function M:showBusyDelayed(seconds, text)
-    self:closeBusy()
-    local token = {}
-    self._busy_token = token
-    UIManager:scheduleIn(seconds or 3, function()
-        if self._busy_token ~= token then return end -- finished meanwhile
-        self._busy_token = nil
-        self:showBusy(text)
-    end)
-end
-
 function M:closeBusy()
-    self._busy_token = nil
     if self.busy_message then
         UIManager:close(self.busy_message)
         self.busy_message = nil

@@ -38,7 +38,7 @@ function CoverLayout.calculate(options)
     local content_height = math.max(1, height - math.min(reserved_height, height - 1))
     local columns = math.max(1, math.floor(width / min_cell_width))
     local rows = math.max(1, math.floor(content_height / min_cell_height))
-    local result = {
+    return {
         columns = columns,
         rows = rows,
         page_size = columns * rows,
@@ -46,7 +46,6 @@ function CoverLayout.calculate(options)
         cell_height = math.max(1, math.floor(content_height / rows)),
         content_height = content_height,
     }
-    return result
 end
 
 return CoverLayout

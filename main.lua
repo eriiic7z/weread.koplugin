@@ -1,4 +1,7 @@
 local Event = require("ui/event")
+-- fork preload: hand our own implementations out under the upstream view module names
+-- (must run before the weread.* requires below; see weread/ui/ko_custom_patches.lua)
+pcall(require("weread.ui.ko_custom_patches").install_preload)
 local logger = require("weread.lib.logger")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -45,9 +48,7 @@ function WeReadPlugin:onZenUIReady()
 end
 
 function WeReadPlugin:init()
-    -- Fork-owned runtime patches (menu veil + local-bookshelf visuals) for
-    -- components we do not own; no KOReader/SimpleUI/coverbrowser file edits.
-    pcall(require("weread.ui.ko_custom_patches").install)
+    pcall(require("weread.ui.ko_custom_patches").install, self) -- fork-owned runtime patches (see that file)
     math.randomseed(os.time())
     self.settings = Settings:new()
     self.external_annotations_db = ExternalAnnotationsDB:new(self.settings)
@@ -169,7 +170,7 @@ function WeReadPlugin:init()
         get_file_context = function(book, path)
             return self:getChapterInfoFromFile(book, path)
         end,
-        run_online = function(_, callback, run_options)
+        run_online = function(_kind, callback, run_options)
             return self:runOnlineTask(
                 _("Sync progress"), callback, nil, run_options)
         end,

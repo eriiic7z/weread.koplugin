@@ -183,66 +183,19 @@ function M:showReadReportBookPicker()
     })
 end
 
-function M:showReadStats(host_mode, host_close)
+function M:showReadStats()
     if not self:requireLogin(false, true) then
         return
     end
-    -- auto-host: hosted overlay (dock/bands) whenever we are NOT inside a
-    -- reader document (reading stats inside a book stays full-screen)
-    if host_mode == nil then
-        local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
-        host_mode = not (ok_r and ReaderUI.instance)
-    end
-    -- Family switch: when the stats page is opened from the bookshelf (its dock
-    -- tab is a SimpleUI QA, so SimpleUI does not close our page for us), hand
-    -- the shelf over as host_close — it is closed only once the stats data is
-    -- ready, exactly like the in-place switch used to do. Without this the
-    -- stats page opens under the still-open shelf and looks like a dead tap.
-    if host_close == nil then
-        pcall(function()
-            local ok_ui, UIManager = pcall(require, "ui/uimanager")
-            local stack = ok_ui and UIManager
-                and (UIManager._window_stack or UIManager.window_stack)
-            for i = #stack, 1, -1 do
-                local w = stack[i] and stack[i].widget
-                if w and w.name == "weread_shelf" then
-                    host_close = w
-                    break
-                end
-            end
-        end)
-    end
-    -- Open on the monthly tab by default. host_close (the shelf view opened
-    -- from) is dropped only once the stats data is ready, so no FM flash.
-    pcall(function()
-        local ok_ui, UIMgr = pcall(require, "ui/uimanager")
-        local stack = ok_ui and UIMgr and (UIMgr._window_stack or UIMgr.window_stack)
-        local top = {}
-        for i = #(stack or {}), 1, -1 do
-            local w = stack[i] and stack[i].widget
-            top[#top + 1] = (w and (w.name or w.id or "?")) or "nil"
-            if #top >= 3 then break end
-        end
-        logger.info("wrFlow: showReadStats host_mode=" .. tostring(host_mode)
-            .. " host_close=" .. tostring(host_close ~= nil)
-            .. " top=" .. table.concat(top, ">"))
-    end)
-    self:loadReadStats("monthly", nil, nil, host_mode, host_close)
+    -- Open on the monthly tab by default.
+    self:loadReadStats("monthly", nil, nil)
 end
 
 -- Fetch reading statistics for a period and (re)show the visualization page.
 -- old_view, when provided, is closed once the new data is ready (tab switch or
--- period navigation). host_close is closed right before the (re)shown page
--- when opening hosted from below (shelf dock).
-function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
-    logger.info("wrFlow: load mode=" .. tostring(mode)
-        .. " host_mode=" .. tostring(host_mode)
-        .. " old_view=" .. tostring(old_view ~= nil)
-        .. " host_close=" .. tostring(host_close ~= nil))
-    -- Delayed: cached loads finish well under this, so the banner only appears
-    -- for a genuinely slow fetch (1.5s ≈ above the fast path, below the point
-    -- where users start doubting the tap and press again).
-    self:showBusyDelayed(1.5, _("Loading reading statistics..."))
+-- period navigation).
+function M:loadReadStats(mode, base_time, old_view)
+    self:showBusy(_("Loading reading statistics..."))
     self:runOnlineTask(_("Reading statistics"), function()
         local ok, data = pcall(function()
             return ReadStats.fetch(self.client, mode, base_time)
@@ -253,66 +206,19 @@ function M:loadReadStats(mode, base_time, old_view, host_mode, host_close)
             self:showInfo(T(_("%1 failed:\n%2"), _("Reading statistics"), display_error(data)))
             return
         end
-        logger.info("wrFlow: fetched, showing")
-        -- Close the page(s) we are replacing FIRST, then show the new one, in this
-        -- same tick — SimpleUI's own tab navigation does exactly that
-        -- (screens/sui_bottombar.lua: "Close the open screen first … Doing
-        -- navigation after avoids a redundant FM repaint while it is still
-        -- covered"), and weread's own read_report.lua also closed old_view before
-        -- showing the next page. closeForNavigation() carries the
-        -- _navbar_closing_intentionally flag so the closing page skips the
-        -- redundant "restore the FM tab" rebuild. Both land in ONE UIManager
-        -- repaint pass; showing first and closing afterwards forced a second pass
-        -- over the already covered area — that was the flash.
         if old_view then
-            pcall(function()
-                if old_view.closeForNavigation then
-                    old_view:closeForNavigation()
-                else
-                    UIManager:close(old_view)
-                end
-            end)
-        end
-        if host_close then
-            pcall(function()
-                if host_close.closeForNavigation then
-                    host_close:closeForNavigation()
-                else
-                    UIManager:close(host_close)
-                end
-            end)
+            UIManager:close(old_view)
         end
         local view
         view = ReadStatsView.show(data, {
-            host_mode = host_mode,
             on_prev = function()
-                self:loadReadStats(mode, data.prev_base_time, view, host_mode)
+                self:loadReadStats(mode, data.prev_base_time, view)
             end,
             on_next = function()
-                self:loadReadStats(mode, data.next_base_time, view, host_mode)
+                self:loadReadStats(mode, data.next_base_time, view)
             end,
             on_switch = function(new_mode)
-                self:loadReadStats(new_mode, nil, view, host_mode)
-            end,
-            -- navpager: long-press on the dock's right arrow jumps back to the
-            -- newest period (base_time = nil); one reload, no stepping.
-            on_latest = function()
-                self:loadReadStats(mode, nil, view, host_mode)
-            end,
-            on_bookshelf = function()
-                -- Same native order (see loadReadStats): close this page first,
-                -- then show the shelf, in one tick — one repaint pass.
-                local closing = view
-                if closing then
-                    pcall(function()
-                        if closing.closeForNavigation then
-                            closing:closeForNavigation()
-                        elseif closing.onClose then
-                            closing:onClose()
-                        end
-                    end)
-                end
-                self:showBookshelf()
+                self:loadReadStats(new_mode, nil, view)
             end,
         })
     end)
